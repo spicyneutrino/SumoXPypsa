@@ -5,7 +5,7 @@
 [![SUMO](https://img.shields.io/badge/SUMO-1.15+-orange.svg)](https://eclipse.org/sumo/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A **world-class, real-time power grid simulation system** integrating electrical power flow analysis, traffic management, electric vehicle simulation, and Vehicle-to-Grid (V2G) energy trading. Built for Manhattan's power infrastructure with advanced AI analytics and machine learning optimization.
+A **real-time power grid simulation system** integrating electrical power flow analysis, traffic management, electric vehicle simulation, and Vehicle-to-Grid (V2G) energy trading. Built for Manhattan's power infrastructure with advanced AI analytics and machine learning optimization.
 
 ![Manhattan Power Grid Dashboard](1.png)
 
@@ -18,6 +18,18 @@ A **world-class, real-time power grid simulation system** integrating electrical
 🔗 **[Watch Demo: Manhattan Power Grid Simulation - Electric Vehicles, V2G & AI Analytics](https://youtu.be/36mGJWjrSxw)**
 
 See the system in action with live power flow analysis, EV simulation, V2G emergency response, and AI-powered grid management.
+
+
+## Citation
+```
+@inproceedings{benbrahim2026sumo,
+  author    = {Marouane Benbrahim and Xin Fang and Zhiqian Chen},
+  title     = {Sumo x PyPSA: Interactive Web Demo of Real-Time Urban Power-Traffic Co-Simulation with Vehicle-to-Grid},
+  booktitle = {Companion Proceedings of the ACM Web Conference 2026 (WWW '26 Companion)},
+  year      = {2026},
+  address   = {Dubai, UAE},
+}
+```
 
 ## 🌟 Key Features
 
