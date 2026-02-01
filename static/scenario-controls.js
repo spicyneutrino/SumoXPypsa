@@ -937,13 +937,48 @@ class ScenarioControllerUI {
     }
 
     startStatusUpdates() {
-        // Update status every 3 seconds
-        this.autoUpdate = setInterval(() => {
-            this.updateStatus();
-        }, 3000);
+        console.log("Starting WebSocket status updates...");
+        // Initialize Socket.IO
+        this.socket = io();
+        
+        this.socket.on('connect', () => {
+            console.log('✓ Connected to Scenario WebSocket');
+        });
 
-        // Initial update
+        this.socket.on('system_update', (data) => {
+            this.handleSystemUpdate(data);
+        });
+
+        // Initial fetch just to be safe
         setTimeout(() => this.updateStatus(), 500);
+    }
+
+    handleSystemUpdate(data) {
+        if (!data) return;
+
+        // 1. Update Scenario UI (Time, Weather, Substations)
+        if (data.scenario) {
+            // Update time if auto-advancing
+            if (data.scenario.auto_advance) {
+                // Update internal time
+                this.currentTime = data.scenario.time_hour + (data.scenario.time_minute/60);
+                
+                // Update UI elements without triggering events
+                const timeSlider = document.getElementById('time-slider');
+                if (timeSlider && Math.abs(timeSlider.value - this.currentTime) > 0.1) {
+                    timeSlider.value = this.currentTime; // This might be jumpy, maybe don't update slider constantly?
+                }
+                this.updateTimeDisplay(this.currentTime);
+            }
+            
+            // Update Substation Status Panel
+            this.updateMainSubstationDisplay(data.scenario.substations);
+        }
+
+        // 2. Update Map and Network Visualization
+        if (window.updateNetworkFromData) {
+            window.updateNetworkFromData(data);
+        }
     }
 
     togglePanel() {
