@@ -14,6 +14,7 @@ ORGANIZED ROUTE STRUCTURE:
 
 from flask import Flask, render_template_string, jsonify, request
 from flask_cors import CORS
+from flask_socketio import SocketIO, emit
 import json
 import threading
 import time
@@ -43,7 +44,19 @@ except Exception:
 
 load_dotenv()
 app = Flask(__name__)
+app.config['SECRET_KEY'] = 'secret!'
 CORS(app)
+socketio = SocketIO(app, async_mode='threading', cors_allowed_origins="*")
+
+# System state - Defined early for access
+from core.sumo_manager import SimulationScenario
+system_state = {
+    'running': True,
+    'sumo_running': False,
+    'simulation_speed': 1.0,
+    'current_time': 0,
+    'scenario': SimulationScenario.MIDDAY
+}
 
 # Initialize systems
 print("=" * 60)
@@ -101,6 +114,32 @@ sumo_manager = ManhattanSUMOManager(integrated_system)
 print("Initializing V2G energy trading system...")
 v2g_manager = V2GManager(integrated_system, sumo_manager)
 
+# Register WebSocket callback for V2G state changes
+def v2g_websocket_callback(event_type, data):
+    """Emit V2G events via WebSocket"""
+    if event_type == 'restoration_complete':
+        # Calculate participating vehicles
+        vehicles = []
+        for vid, session in v2g_manager.active_sessions.items():
+            if session.substation_id == data['substation']:
+                vehicles.append({
+                    'id': vid,
+                    'earnings': session.earnings,
+                    'energy_delivered': session.power_delivered_kwh
+                })
+        
+        # Emit restoration complete event
+        socketio.emit('v2g_restoration_complete', {
+            'substation': data['substation'],
+            'energy_delivered': data['energy_delivered'],
+            'revenue': data['total_revenue'],
+            'vehicles': vehicles
+        })
+        print(f"[WebSocket] Emitted v2g_restoration_complete for {data['substation']}")
+
+v2g_manager.register_notification_callback(v2g_websocket_callback)
+print("V2G WebSocket notifications enabled")
+
 sumo_manager.set_v2g_manager(v2g_manager)
 
 # Initialize Enhanced ML Engine with V2G integration
@@ -130,7 +169,11 @@ except ImportError as e:
 
 # Initialize OpenAI client (optional if key provided)
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-openai_client = OpenAI(api_key=OPENAI_API_KEY) if (OPENAI_API_KEY and OpenAI) else None
+try:
+    openai_client = OpenAI(api_key=OPENAI_API_KEY) if (OPENAI_API_KEY and OpenAI) else None
+except Exception as e:
+    print(f"OpenAI client initialization skipped: {e}")
+    openai_client = None
 
 # Initialize REALISTIC LOAD MODEL and SCENARIO CONTROLLER
 print("=" * 60)
@@ -146,11 +189,83 @@ try:
     load_model = RealisticLoadModel(integrated_system)
 
     print("Initializing scenario controller...")
+    
+    # Define WebSocket broadcast callback
+    # Define WebSocket broadcast callback - WORLD CLASS REAL-TIME UPDATES
+    def broadcast_state(scenario_status):
+        try:
+            # 1. Get Base Network State (Substations, Cables, etc.)
+            # This should be fast as it reads from internal memory structure
+            state = integrated_system.get_network_state()
+            
+            # 2. Add Scenario Controller Data (Time, Weather, Stats)
+            state['scenario'] = scenario_status
+            
+            # 3. Add Real-Time Vehicle Data if SUMO is running
+            if system_state.get('sumo_running', False) and sumo_manager.running:
+                try:
+                    import traci
+                    # OPTIMIZED: Get all vehicle data in one go if possible, or iterate efficiently
+                    active_ids = traci.vehicle.getIDList()
+                    vehicles = []
+                    
+                    for vid in active_ids:
+                        try:
+                            # Essential data for map visualization
+                            x, y = traci.vehicle.getPosition(vid)
+                            lon, lat = traci.simulation.convertGeo(x, y)
+                            
+                            # Determine type and color
+                            # We can cache vehicle types if needed, but this is okay for 100 vehicles
+                            # For 1000+ vehicles, we might need strictly optimize this
+                            
+                            vehicles.append({
+                                'id': vid,
+                                'lat': lat,
+                                'lon': lon,
+                                # We can infer type/color on frontend to save bandwidth
+                            })
+                        except:
+                            continue
+                            
+                    state['vehicles'] = vehicles
+                    state['vehicle_count'] = len(vehicles)
+                except Exception as e:
+                    print(f"Socket vehicle update error: {e}")
+            
+            # 4. Add V2G Data if initialized
+            if 'v2g_manager' in globals() and v2g_manager:
+                try:
+                    # Get the full dash data - this is efficient as it uses internal state
+                    v2g_data = v2g_manager.get_v2g_dashboard_data()
+                    state['v2g'] = v2g_data
+                except Exception as e:
+                    print(f"Socket V2G update error: {e}")
+            
+            # 5. Add AI Map Focus Data if available
+            if 'ai_map_focus_data' in globals() and ai_map_focus_data:
+                try:
+                    state['ai_focus'] = {
+                        'has_update': True,
+                        'focus_data': ai_map_focus_data
+                    }
+                except Exception as e:
+                    print(f"Socket AI focus update error: {e}")
+            else:
+                state['ai_focus'] = {'has_update': False}
+            
+            # Emit unified system update event
+            socketio.emit('system_update', state)
+            
+        except Exception as e:
+            print(f"Broadcast error: {e}")
+        
     scenario_controller = ScenarioController(
         integrated_system=integrated_system,
         load_model=load_model,
         power_grid=power_grid,
-        sumo_manager=sumo_manager
+        sumo_manager=sumo_manager,
+        on_update_callback=broadcast_state
     )
 
     # Start automatic monitoring
@@ -206,14 +321,7 @@ def preload_edge_shapes(max_edges: int | None = None) -> int:
         return count
     return count
 
-# System state
-system_state = {
-    'running': True,
-    'sumo_running': False,
-    'simulation_speed': 1.0,
-    'current_time': 0,
-    'scenario': SimulationScenario.MIDDAY
-}
+
 
 # EV Configuration
 current_ev_config = {
@@ -2036,4 +2144,4 @@ if __name__ == '__main__':
     print("     - Fail substations to see EV stations go offline")
     print("=" * 60)
 
-    app.run(debug=False, port=5000)
+    socketio.run(app, debug=False, port=5000, allow_unsafe_werkzeug=True)
