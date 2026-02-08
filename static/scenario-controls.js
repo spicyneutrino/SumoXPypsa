@@ -533,17 +533,26 @@ class ScenarioControllerUI {
     }
 
     async runScenario(scenarioName) {
+        console.log(`🚀 Running scenario: ${scenarioName}`);
         try {
             let scenarioConfig = {};
 
+            // Morning Rush Hour - 8:00 AM, 75°F, 95 vehicles (PEAK TRAFFIC)
+            // Evening Rush Hour - 6:00 PM, 80°F, 98 vehicles (HEAVIEST TRAFFIC)
+            // Normal Day - 12:00 PM, 72°F, 65 vehicles (MODERATE TRAFFIC)
+            // Heatwave Crisis - 3:00 PM, 98°F, 85 vehicles - EXTREME CONDITIONS!
+            // CATASTROPHIC HEAT - 2:00 PM, 115°F, 75 vehicles (REDUCED - heat avoidance)
+            // Late Night - 3:00 AM, 65°F, 15 vehicles (MINIMAL TRAFFIC)
+            
             // Define scenario configurations
             switch(scenarioName) {
                 case 'morning_rush':
                     scenarioConfig = {
                         time: 8,
                         temp: 75,
-                        vehicles: 95,  // PEAK RUSH - Heavy commuter traffic
-                        description: '🌅 Morning Rush Hour - 8:00 AM, 75°F, 95 vehicles (PEAK TRAFFIC)'
+                        vehicles: 95,  // TARGET - actual may be lower due to routing
+                        name: '🌅 Morning Rush Hour',
+                        timeDesc: '8:00 AM'
                     };
                     break;
 
@@ -551,8 +560,9 @@ class ScenarioControllerUI {
                     scenarioConfig = {
                         time: 18,
                         temp: 80,
-                        vehicles: 98,  // HIGHEST TRAFFIC - Commute home + errands + deliveries
-                        description: '🌆 Evening Rush Hour - 6:00 PM, 80°F, 98 vehicles (HEAVIEST TRAFFIC)'
+                        vehicles: 98,  // TARGET - actual may be lower due to routing
+                        name: '🌆 Evening Rush Hour',
+                        timeDesc: '6:00 PM'
                     };
                     break;
 
@@ -560,8 +570,9 @@ class ScenarioControllerUI {
                     scenarioConfig = {
                         time: 12,
                         temp: 72,
-                        vehicles: 65,  // MODERATE - Lunch traffic, less than rush hour
-                        description: '☀️ Normal Day - 12:00 PM, 72°F, 65 vehicles (MODERATE TRAFFIC)'
+                        vehicles: 65,
+                        name: '☀️ Normal Day',
+                        timeDesc: '12:00 PM'
                     };
                     break;
 
@@ -569,8 +580,9 @@ class ScenarioControllerUI {
                     scenarioConfig = {
                         time: 15,
                         temp: 98,
-                        vehicles: 85,  // HIGH - Afternoon activity in extreme heat
-                        description: '🔥 Heatwave Crisis - 3:00 PM, 98°F, 85 vehicles - EXTREME CONDITIONS!'
+                        vehicles: 85,
+                        name: '🔥 Heatwave Crisis',
+                        timeDesc: '3:00 PM'
                     };
                     break;
 
@@ -578,8 +590,9 @@ class ScenarioControllerUI {
                     scenarioConfig = {
                         time: 14,
                         temp: 115,
-                        vehicles: 75,  // REDUCED - Many avoid travel in catastrophic heat
-                        description: '☢️ CATASTROPHIC HEAT - 2:00 PM, 115°F, 75 vehicles (REDUCED - heat avoidance)'
+                        vehicles: 75,
+                        name: '☢️ CATASTROPHIC HEAT',
+                        timeDesc: '2:00 PM'
                     };
                     break;
 
@@ -587,8 +600,9 @@ class ScenarioControllerUI {
                     scenarioConfig = {
                         time: 3,
                         temp: 65,
-                        vehicles: 15,  // MINIMAL - Only essential/night shift traffic
-                        description: '🌙 Late Night - 3:00 AM, 65°F, 15 vehicles (MINIMAL TRAFFIC)'
+                        vehicles: 15,
+                        name: '🌙 Late Night',
+                        timeDesc: '3:00 AM'
                     };
                     break;
 
@@ -617,13 +631,16 @@ class ScenarioControllerUI {
             // Set temperature
             await this.setTemperature(scenarioConfig.temp);
 
-            // Add vehicles using SUMO
-            await this.spawnVehicles(scenarioConfig.vehicles);
+            // Add vehicles using SUMO - this returns actual count
+            const actualCount = await this.spawnVehicles(scenarioConfig.vehicles);
 
-            console.log(`✓ Scenario started: ${scenarioConfig.description}`);
+            // Build description with ACTUAL spawned count
+            const description = `${scenarioConfig.name} - ${scenarioConfig.timeDesc}, ${scenarioConfig.temp}°F, ${actualCount || scenarioConfig.vehicles} vehicles`;
+            
+            console.log(`✓ Scenario started: ${description}`);
 
-            // Show notification
-            this.showNotification(scenarioConfig.description);
+            // Show final notification with actual count
+            this.showNotification(description);
 
         } catch (error) {
             console.error('Error running scenario:', error);

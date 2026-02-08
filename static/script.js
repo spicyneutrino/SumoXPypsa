@@ -1360,10 +1360,49 @@ interpolate(deltaTime) {
             
             if (networkState.vehicle_stats) {
                 const active = (networkState.vehicles || []).length;
-                updateWithAnimation('active-vehicles', active);
+                const pending = networkState.vehicle_stats.pending_vehicles || 0;
+                const totalConfigured = networkState.vehicle_stats.total_configured || active;
+                
+                // STATE PERSISTENCE: Prevent flicker by caching last valid count
+                // Only update if we have valid data OR if SUMO is explicitly stopped
+                if (!window.lastValidVehicleCount) {
+                    window.lastValidVehicleCount = 0;
+                }
+                
+                // Determine which count to display
+                let displayCount = active;
+                if (active === 0 && window.lastValidVehicleCount > 0) {
+                    // Check if SUMO is actually stopped (from reactive control updates)
+                    const sumoStopped = networkState.sumo_running === false;
+                    
+                    if (!sumoStopped) {
+                        // SUMO is running but we got empty data - use last known count
+                        displayCount = window.lastValidVehicleCount;
+                    } else {
+                        // SUMO is stopped - accept the zero and clear cache
+                        window.lastValidVehicleCount = 0;
+                    }
+                } else if (active > 0) {
+                    // Valid count - cache it
+                    window.lastValidVehicleCount = active;
+                }
+                
+                // Format display with pending info
+                let vehicleDisplayText = displayCount.toString();
+                if (pending > 0) {
+                    vehicleDisplayText = `${displayCount} (+${pending} queued)`;
+                }
+                
+                // Update all vehicle count elements
+                const vehicleCountElements = ['active-vehicles', 'vehicle-count', 'footer-vehicle-count'];
+                vehicleCountElements.forEach(elemId => {
+                    const elem = document.getElementById(elemId);
+                    if (elem) {
+                        elem.textContent = vehicleDisplayText;
+                    }
+                });
+                
                 updateWithAnimation('ev-count', networkState.vehicle_stats.ev_vehicles || 0);
-                updateWithAnimation('vehicle-count', active);
-                updateWithAnimation('footer-vehicle-count', active);  // Update footer status bar
                 const chargingCount = networkState.vehicle_stats.vehicles_charging || 0;
                 updateWithAnimation('charging-stations', chargingCount);
                 updateWithAnimation('vehicles-charging-count', chargingCount);
@@ -2315,11 +2354,8 @@ function initializeEVStationLayer() {
         
         const result = await response.json();
         if (result.success) {
-            sumoRunning = true;
-            document.getElementById('start-sumo-btn').disabled = true;
-            document.getElementById('stop-sumo-btn').disabled = false;
-            document.getElementById('spawn10-btn').disabled = false;
-            showNotification('✅ Vehicles Started', result.message, 'success');
+            // REACTIVE MODE: Don't update UI here - wait for WebSocket to confirm
+            showNotification('✅ Starting Vehicles...', result.message, 'success');
         } else {
             showNotification('❌ Failed', 'Failed to start SUMO: ' + result.message, 'error');
         }
@@ -2351,15 +2387,8 @@ function initializeEVStationLayer() {
         const result = await response.json();
         
         if (result.success) {
-            sumoRunning = false;
-            document.getElementById('start-sumo-btn').disabled = false;
-            document.getElementById('stop-sumo-btn').disabled = true;
-            document.getElementById('spawn10-btn').disabled = true;
-            
-            if (vehicleRenderer) {
-                vehicleRenderer.clear();
-            }
-            showNotification('⏹️ Vehicles Stopped', 'Simulation halted', 'info');
+            // REACTIVE MODE: Don't update UI here - wait for WebSocket to confirm
+            showNotification('⏹️ Stopping Vehicles...', 'Halting simulation', 'info');
         }
     }
 
@@ -2497,6 +2526,9 @@ function initializeEVStationLayer() {
             applyAIMapFocus(state.ai_focus.focus_data);
         }
         
+        // REACTIVE MODE: Update global controls based on server state
+        updateGlobalControls(state);
+        
         updateUI();
         renderNetwork();
         if (layers.vehicles && vehicleRenderer && networkState.vehicles) {
@@ -2504,6 +2536,87 @@ function initializeEVStationLayer() {
         }
         renderEVStations();
         updateVehicleSymbolLayer();
+    }
+    
+    /**
+     * REACTIVE UI UPDATE - Update global controls based on WebSocket data
+     * This ensures UI reflects actual server state, not predicted state
+     */
+    function updateGlobalControls(data) {
+        // 1. Update SUMO Start/Stop button states based on server status
+        const sumoIsRunning = data.sumo_running || false;
+        
+        const startBtn = document.getElementById('start-sumo-btn');
+        const stopBtn = document.getElementById('stop-sumo-btn');
+        const spawn10Btn = document.getElementById('spawn10-btn');
+        
+        if (sumoIsRunning) {
+            // SUMO is running - enable Stop, disable Start
+            if (startBtn) startBtn.disabled = true;
+            if (stopBtn) stopBtn.disabled = false;
+            if (spawn10Btn) spawn10Btn.disabled = false;
+            
+            // Update global state
+            sumoRunning = true;
+        } else {
+            // SUMO is stopped - enable Start, disable Stop
+            if (startBtn) startBtn.disabled = false;
+            if (stopBtn) stopBtn.disabled = true;
+            if (spawn10Btn) spawn10Btn.disabled = true;
+            
+            // Clear vehicle renderer when stopped
+            if (vehicleRenderer && !sumoIsRunning && sumoRunning) {
+                vehicleRenderer.clear();
+            }
+            
+            // Update global state
+            sumoRunning = false;
+        }
+        
+        // 2. Update Dashboard Sidebar Counters
+        if (data.statistics) {
+            const stats = data.statistics;
+            
+            // Traffic Lights counters
+            const totalLightsEl = document.getElementById('total-traffic-lights');
+            const poweredLightsEl = document.getElementById('powered-lights');
+            
+            if (totalLightsEl) {
+                totalLightsEl.textContent = stats.total_traffic_lights || 0;
+            }
+            if (poweredLightsEl) {
+                poweredLightsEl.textContent = stats.powered_traffic_lights || 0;
+            }
+            
+            // MW Load counter
+            const loadEl = document.getElementById('total-load');
+            if (loadEl && stats.total_load_mw !== undefined) {
+                loadEl.textContent = stats.total_load_mw.toFixed(1);
+            }
+        }
+        
+        // 3. Update Bottom Status Bar
+        const systemStatusEl = document.getElementById('system-status');
+        const systemIndicatorEl = document.getElementById('system-indicator');
+        
+        if (data.statistics) {
+            const operational = data.statistics.operational_substations || 0;
+            const total = data.statistics.total_substations || 0;
+            const failures = total - operational;
+            
+            if (systemStatusEl && systemIndicatorEl) {
+                if (failures === 0) {
+                    systemIndicatorEl.style.background = 'var(--primary-glow)';
+                    systemStatusEl.textContent = 'System Online';
+                } else if (failures <= 2) {
+                    systemIndicatorEl.style.background = 'var(--warning-glow)';
+                    systemStatusEl.textContent = `${failures} Substation${failures > 1 ? 's' : ''} Failed`;
+                } else {
+                    systemIndicatorEl.style.background = 'var(--danger-glow)';
+                    systemStatusEl.textContent = 'Critical Failures';
+                }
+            }
+        }
     }
     
     // New function to handle V2G updates from WebSocket

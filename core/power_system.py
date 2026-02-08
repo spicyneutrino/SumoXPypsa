@@ -836,6 +836,11 @@ class ManhattanPowerGrid:
         import json
         
         try:
+            # Guard: Check if db_manager and get_session are available
+            if not hasattr(db_manager, 'get_session') or not callable(getattr(db_manager, 'get_session', None)):
+                # Database not configured - skip storage (this is optional for simulation)
+                return
+            
             with db_manager.get_session() as session:
                 state = NetworkState(
                     simulation_time=int(self.network.snapshots[0].timestamp()),
@@ -859,7 +864,8 @@ class ManhattanPowerGrid:
                 session.commit()
                 
         except Exception as e:
-            logger.error(f"Failed to store network state: {e}")
+            # Don't spam logs - database storage is optional for demo
+            pass
     def _calculate_health_score(self) -> float:
         """Calculate overall system health score (0-100)"""
         

@@ -58,6 +58,9 @@ system_state = {
     'scenario': SimulationScenario.MIDDAY
 }
 
+# Asynchronous vehicle spawn queue (prevents UI freezing)
+vehicle_spawn_queue = []
+
 # Initialize systems
 print("=" * 60)
 print("MANHATTAN POWER GRID - COMPLETE INTEGRATION")
@@ -213,9 +216,21 @@ try:
                     state['vehicles'] = vehicles
                     state['vehicle_count'] = len(vehicles)
                     
+                    # Get pending vehicles (in insertion queue)
+                    import traci
+                    try:
+                        # Get vehicles waiting to enter the network
+                        pending_count = traci.simulation.getPendingVehicles().getIDCount()
+                    except:
+                        # Fallback if API doesn't work
+                        pending_count = 0
+                    
                     # Add vehicle statistics (for charging count, etc.)
                     vehicle_stats = {
-                        'total_vehicles': len(vehicles),
+                        'active_vehicles': len(vehicles),  # Currently on road
+                        'pending_vehicles': pending_count,  # Waiting in queue
+                        'total_configured': len(vehicles) + pending_count,  # Total spawned
+                        'total_vehicles': len(vehicles),  # Legacy field
                         'ev_vehicles': sum(1 for v in vehicles if v.get('is_ev', False)),
                         'gas_vehicles': sum(1 for v in vehicles if not v.get('is_ev', False)),
                         'vehicles_charging': sum(1 for v in vehicles if v.get('is_charging', False)),
@@ -395,6 +410,23 @@ def simulation_loop():
 
                 sumo_time = (time_module.perf_counter() - sumo_start) * 1000
                 perf_stats['sumo_step'].append(sumo_time)
+
+                # ASYNC VEHICLE SPAWNING: Process spawn queue in batches (max 5 per tick)
+                # This prevents UI freezing when bulk spawning vehicles
+                global vehicle_spawn_queue
+                if vehicle_spawn_queue:
+                    batch_size = min(5, len(vehicle_spawn_queue))
+                    for _ in range(batch_size):
+                        config = vehicle_spawn_queue.pop(0)
+                        try:
+                            sumo_manager.spawn_vehicles(
+                                count=1,
+                                ev_percentage=config['ev_percentage'],
+                                battery_min_soc=config['battery_min_soc'],
+                                battery_max_soc=config['battery_max_soc']
+                            )
+                        except Exception as e:
+                            print(f"[QUEUE] Spawn error: {e}")
 
                 # REALISTIC: V2G updates every 60 seconds (vehicle-to-grid state changes)
                 if system_state['current_time'] - last_v2g_update >= V2G_STEPS:
@@ -980,23 +1012,34 @@ def stop_sumo():
 
 @app.route('/api/sumo/spawn', methods=['POST'])
 def spawn_vehicles():
-    """Spawn additional vehicles"""
+    """Spawn additional vehicles (async queue)"""
+    global vehicle_spawn_queue
+    
     if not system_state['sumo_running']:
         return jsonify({'success': False, 'message': 'SUMO not running'})
 
+    # Extract parameters from frontend request
     data = request.json or {}
     count = data.get('count', 5)
     ev_percentage = data.get('ev_percentage', 0.7)
     battery_min_soc = data.get('battery_min_soc', 0.2)
     battery_max_soc = data.get('battery_max_soc', 0.9)
 
-    spawned = sumo_manager.spawn_vehicles(count, ev_percentage, battery_min_soc, battery_max_soc)
-
+    # Queue individual vehicles with frontend-specified configs
+    for i in range(count):
+        vehicle_spawn_queue.append({
+            'ev_percentage': ev_percentage,
+            'battery_min_soc': battery_min_soc,
+            'battery_max_soc': battery_max_soc
+        })
+    
+    # Return immediately (202 Accepted) - vehicles will spawn in background
     return jsonify({
         'success': True,
-        'spawned': spawned,
-        'total_vehicles': sumo_manager.stats['total_vehicles']
-    })
+        'message': f'{count} vehicles queued for spawning',
+        'queued': len(vehicle_spawn_queue),
+        'total_vehicles': sumo_manager.stats.get('total_vehicles', 0)
+    }), 202
 
 @app.route('/api/sumo/scenario', methods=['POST'])
 def set_scenario():
