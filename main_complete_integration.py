@@ -201,35 +201,30 @@ try:
             # 2. Add Scenario Controller Data (Time, Weather, Stats)
             state['scenario'] = scenario_status
             
-            # 3. Add Real-Time Vehicle Data if SUMO is running
+            # 3. Add SUMO Running Flag (needed for Start/Stop button state)
+            state['sumo_running'] = system_state.get('sumo_running', False)
+            
+            # 4. Add Real-Time Vehicle Data if SUMO is running
             if system_state.get('sumo_running', False) and sumo_manager.running:
                 try:
-                    import traci
-                    # OPTIMIZED: Get all vehicle data in one go if possible, or iterate efficiently
-                    active_ids = traci.vehicle.getIDList()
-                    vehicles = []
-                    
-                    for vid in active_ids:
-                        try:
-                            # Essential data for map visualization
-                            x, y = traci.vehicle.getPosition(vid)
-                            lon, lat = traci.simulation.convertGeo(x, y)
-                            
-                            # Determine type and color
-                            # We can cache vehicle types if needed, but this is okay for 100 vehicles
-                            # For 1000+ vehicles, we might need strictly optimize this
-                            
-                            vehicles.append({
-                                'id': vid,
-                                'lat': lat,
-                                'lon': lon,
-                                # We can infer type/color on frontend to save bandwidth
-                            })
-                        except:
-                            continue
-                            
+                    # Use the complete vehicle visualization method that includes all data
+                    # (battery_percent, soc, is_ev, is_charging, etc.)
+                    vehicles = sumo_manager.get_vehicle_positions_for_visualization()
                     state['vehicles'] = vehicles
                     state['vehicle_count'] = len(vehicles)
+                    
+                    # Add vehicle statistics (for charging count, etc.)
+                    vehicle_stats = {
+                        'total_vehicles': len(vehicles),
+                        'ev_vehicles': sum(1 for v in vehicles if v.get('is_ev', False)),
+                        'gas_vehicles': sum(1 for v in vehicles if not v.get('is_ev', False)),
+                        'vehicles_charging': sum(1 for v in vehicles if v.get('is_charging', False)),
+                        'vehicles_low_battery': sum(1 for v in vehicles if v.get('is_ev', False) and v.get('battery_percent', 100) < 20),
+                        'vehicles_medium_battery': sum(1 for v in vehicles if v.get('is_ev', False) and 20 <= v.get('battery_percent', 100) < 50),
+                        'vehicles_high_battery': sum(1 for v in vehicles if v.get('is_ev', False) and v.get('battery_percent', 100) >= 50),
+                    }
+                    state['vehicle_stats'] = vehicle_stats
+                    
                 except Exception as e:
                     print(f"Socket vehicle update error: {e}")
             
