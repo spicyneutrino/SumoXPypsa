@@ -279,7 +279,7 @@ try:
     )
 
     # Start automatic monitoring
-    scenario_controller.start_auto_monitoring()
+    # scenario_controller.start_auto_monitoring() # DISABLED: Controlled by simulation_loop now
 
     # Add API endpoints
     integrate_scenario_controller(app, scenario_controller, load_model)
@@ -385,6 +385,10 @@ def simulation_loop():
     print(f"V2G State Update:       {V2G_UPDATE}s (V2G session rate)")
     print("="*70 + "\n")
 
+    # BROADCAST OPTIMIZATION
+    BROADCAST_INTERVAL = 5  # Send 1 update per 5 physics steps
+    step_counter = 0
+
     while system_state['running']:
         try:
             step_start = time_module.perf_counter()
@@ -410,6 +414,15 @@ def simulation_loop():
 
                 sumo_time = (time_module.perf_counter() - sumo_start) * 1000
                 perf_stats['sumo_step'].append(sumo_time)
+
+                # SOCKET BROADCAST: Frame Skipping Logic
+                step_counter += 1
+                if step_counter % BROADCAST_INTERVAL == 0:
+                    try:
+                        status = scenario_controller.get_system_status() if scenario_controller else {"status": "Running"}
+                        broadcast_state(status)
+                    except Exception as e:
+                        print(f"Broadcast loop error: {e}")
 
                 # ASYNC VEHICLE SPAWNING: Process spawn queue in batches (max 5 per tick)
                 # This prevents UI freezing when bulk spawning vehicles

@@ -570,8 +570,9 @@ class ManhattanSUMOManager:
                         else:
                             continue
                     
-                    # Try to find route
-                    route_result = traci.simulation.findRoute(origin, destination)
+                    # CRITICAL FIX: Use findRoute with vType to validate departure edge permissions
+                    # This checks if the vehicle TYPE can actually depart from the origin edge
+                    route_result = traci.simulation.findRoute(origin, destination, vType=vtype)
                     
                     if route_result and route_result.edges and len(route_result.edges) > 0:
                         # Valid route found!
@@ -580,13 +581,20 @@ class ManhattanSUMOManager:
                         # Add route
                         traci.route.add(route_id, route_result.edges)
                         
-                        # Add vehicle
-                        traci.vehicle.add(
-                            vehicle_id,
-                            route_id,
-                            typeID=vtype,
-                            depart="now"
-                        )
+                        # Add vehicle with explicit departure checking
+                        try:
+                            traci.vehicle.add(
+                                vehicle_id,
+                                route_id,
+                                typeID=vtype,
+                                depart="now"
+                            )
+                        except Exception as e:
+                            # If departure fails, remove the edge from valid_edges
+                            if origin in valid_edges:
+                                valid_edges.remove(origin)
+                            print(f"  Departure failed on edge {origin}: {str(e)}, removed from valid edges")
+                            continue
                         
                         # Set REALISTIC Manhattan speeds and COLLISION PREVENTION
                         traci.vehicle.setMaxSpeed(vehicle_id, 13.9)  # 50 km/h (31 mph) - realistic city speed
