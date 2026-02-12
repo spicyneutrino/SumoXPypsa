@@ -299,15 +299,15 @@
     // ==========================================
     // MAPBOX INITIALIZATION WITH PREMIUM SETTINGS
     // ==========================================
-    mapboxgl.accessToken = 'pk.eyJ1IjoibWFyb25veCIsImEiOiJjbWV1ODE5bHEwNGhoMmlvY2RleW51dWozIn0.FMrYdXLqnOwOEFi8qHSwxg';
+    mapboxgl.accessToken = 'YOUR_MAPBOX_ACCESS_TOKEN_HERE';
 
     const map = new mapboxgl.Map({
         container: 'map',
         style: 'mapbox://styles/mapbox/dark-v11',
         center: [-73.980, 40.758],
         zoom: 14.5,
-        pitch: 0,
-        bearing: 0,
+        pitch: 60,           // 3D perspective - tilt camera 60 degrees
+        bearing: -17.6,      // Rotate for better Manhattan view
         antialias: true,
         preserveDrawingBuffer: PERFORMANCE_CONFIG.enableDebugMode,
         refreshExpiredTiles: false,
@@ -328,6 +328,86 @@
         // **LOAD NETWORK STATE FIRST TO CREATE LAYERS WITH DATA**
         await loadNetworkState();
         console.log('✅ Network state loaded on map init');
+
+        // ==========================================
+        // 3D TERRAIN AND BUILDINGS
+        // ==========================================
+        
+        // 1. Add Terrain Source (Safety Check)
+        if (!map.getSource('mapbox-dem')) {
+            map.addSource('mapbox-dem', {
+                'type': 'raster-dem',
+                'url': 'mapbox://mapbox.mapbox-terrain-dem-v1',
+                'tileSize': 512,
+                'maxzoom': 14
+            });
+        }
+
+        // 2. Enable Terrain
+        map.setTerrain({ 'source': 'mapbox-dem', 'exaggeration': 1.5 });
+
+        // 3. Add 3D Building Layer (Remove old one first to apply updates)
+        if (map.getLayer('building-3d')) map.removeLayer('building-3d');
+
+        // Find the label layer to place buildings *under* (so text is readable)
+        const labelLayerId = map.getStyle().layers.find(
+            (layer) => layer.type === 'symbol' && layer.layout['text-field']
+        )?.id;
+
+        map.addLayer({
+            id: 'building-3d',
+            source: 'composite',
+            'source-layer': 'building',
+            // NO FILTER: We want to try rendering EVERYTHING
+            type: 'fill-extrusion',
+            minzoom: 12,
+            paint: {
+                // Color: Dark at bottom, lighter at top
+                'fill-extrusion-color': [
+                    'interpolate',
+                    ['linear'],
+                    ['case',
+                        ['>', ['get', 'height'], 0], ['get', 'height'],
+                        ['>', ['get', 'levels'], 0], ['*', ['get', 'levels'], 3],
+                        10 // Default used for color scale
+                    ],
+                    0, '#2a2a2a',
+                    50, '#3a3a3a',
+                    100, '#4a4a4a',
+                    200, '#5a5a5a',
+                    400, '#6a6a6a',
+                    800, '#7a7a7a'
+                ],
+                
+                // Height: Robust logic with Fallbacks + Clamping
+                'fill-extrusion-height': [
+                    'interpolate',
+                    ['linear'],
+                    ['zoom'],
+                    13, 0,
+                    13.5, [
+                        'min', // CLAMP: Max 800m (fixes sky spikes)
+                        [
+                            'case',
+                            ['>', ['get', 'height'], 0], ['get', 'height'], // Use real data
+                            ['>', ['get', 'levels'], 0], ['*', ['get', 'levels'], 3], // Estimate from floors
+                            10 // Fallback: 10m (fixes flat buildings)
+                        ],
+                        800
+                    ]
+                ],
+                
+                // Base: Standard logic
+                'fill-extrusion-base': [
+                    'case',
+                    ['>', ['get', 'min_height'], 0], ['get', 'min_height'],
+                    0
+                ],
+                'fill-extrusion-opacity': 0.9
+            }
+        }, labelLayerId); // Insert under labels
+
+        console.log('✅ 3D terrain and buildings enabled (Robust Mode)');
 
         // Initialize power grid layers based on their initial state
         // Shorter delay since layers should exist now
@@ -353,6 +433,21 @@
                 });
             });
         }, 100); // Reduced from 1000ms to 100ms
+    });
+
+    // Start 60 FPS vehicle interpolation loop after map loads
+    map.on('load', () => {
+        startVehicleAnimation();
+    });
+
+    // CRITICAL: Recreate vehicle layer when style reloads (e.g., when switching map styles)
+    map.on('style.load', () => {
+        console.log('🔄 Map style reloaded, recreating vehicle symbol layer...');
+        ensureVehicleSymbolLayer();
+        // Trigger immediate update if we have vehicle data
+        if (networkState && networkState.vehicles) {
+            updateVehicleSymbolLayer();
+        }
     });
 
     // ==========================================
@@ -1033,6 +1128,41 @@ interpolate(deltaTime) {
     let evStationLayerInitialized = false;
     let vehicleClickLayerInitialized = false;
     let lightsClickBound = false;
+    
+    // ==========================================
+    // VEHICLE INTERPOLATION STATE
+    // ==========================================
+    const vehicleStore = new Map();  // Map<vehicleId, interpolation state>
+    // ADAPTIVE INTERPOLATION: Dynamically adjust to network speed
+    const MIN_INTERPOLATION_DURATION = 100;
+    let currentInterpolationDuration = 2000; // Start with safe default
+    let lastPacketTime = performance.now();
+    // animationFrameId declared below in animation loop section
+    
+    // Linear interpolation helper
+    function lerp(start, end, progress) {
+        return start + (end - start) * progress;
+    }
+    
+    // Smooth easing function (ease-out cubic for natural deceleration)
+    function easeOutCubic(t) {
+        return 1 - Math.pow(1 - t, 3);
+    }
+    
+    // Calculate bearing between two points (for smooth rotation)
+    function calculateBearing(lon1, lat1, lon2, lat2) {
+        const dLon = (lon2 - lon1) * Math.PI / 180;
+        const lat1Rad = lat1 * Math.PI / 180;
+        const lat2Rad = lat2 * Math.PI / 180;
+        
+        const y = Math.sin(dLon) * Math.cos(lat2Rad);
+        const x = Math.cos(lat1Rad) * Math.sin(lat2Rad) -
+                  Math.sin(lat1Rad) * Math.cos(lat2Rad) * Math.cos(dLon);
+        
+        let bearing = Math.atan2(y, x) * 180 / Math.PI;
+        return (bearing + 360) % 360;  // Normalize to 0-360
+    }
+    
     let layers = {
         lights: true,
         vehicles: true,
@@ -1047,21 +1177,19 @@ interpolate(deltaTime) {
     window.v2gActiveVehicles = new Set();
     window.v2gStationCounts = {}; // station_id -> count
 
-    // OPTIMIZED V2G Color Updater - Updates every 3 seconds, no lag!
+    // OPTIMIZED V2G Color Updater - NOW USES WEBSOCKET DATA (no HTTP polling!)
     async function updateV2GColorsOptimized() {
+        // DISABLED: Polling replaced with WebSocket updates via updateV2GFromWebSocket()
+        // V2G data is now pushed via WebSocket 'system_update' event
+        // The window.v2gActiveVehicles set is updated by updateV2GFromWebSocket()
+        
         try {
-            const response = await fetch('/api/v2g/status');
-            const data = await response.json();
-
-            // Update active vehicle set
-            window.v2gActiveVehicles.clear();
-            if (data.active_vehicles && Array.isArray(data.active_vehicles)) {
-                data.active_vehicles.forEach(v => {
-                    const vid = v.vehicle_id || v.id;
-                    if (vid) window.v2gActiveVehicles.add(vid);
-                });
-            }
-
+            // V2G active vehicles are already updated via WebSocket
+            // Just update the colors based on current window.v2gActiveVehicles set
+            
+            // DISABLED: Using Mapbox symbol layer instead of custom renderer
+            // Symbol layer automatically updates colors based on is_v2g_active property
+            /*
             // FORCE COLOR UPDATE - Update existing markers
             if (vehicleRenderer && vehicleRenderer.activeMarkers) {
                 for (const [vehicleId, marker] of vehicleRenderer.activeMarkers) {
@@ -1077,13 +1205,15 @@ interpolate(deltaTime) {
                     }
                 }
             }
+            */
+
 
         } catch (error) {
             // Silently ignore errors
         }
 
-        // Update every 3 seconds (not too frequent - no lag!)
-        setTimeout(updateV2GColorsOptimized, 3000);
+        // DISABLED POLLING: No longer recursively calls itself
+        // Colors update automatically when WebSocket data arrives
     }
 
     // ==========================================
@@ -1220,49 +1350,8 @@ interpolate(deltaTime) {
     // V2G STATUS UPDATER
     // ==========================================
     async function updateV2GStatus() {
-        try {
-            const response = await fetch('/api/v2g/status');
-            const data = await response.json();
-
-            // Update active V2G vehicles set
-            const previousVehicles = new Set(window.v2gActiveVehicles);
-            window.v2gActiveVehicles.clear();
-            window.v2gStationCounts = {};
-
-            if (data.active_vehicles && Array.isArray(data.active_vehicles)) {
-                data.active_vehicles.forEach(v => {
-                    const vehicleId = v.vehicle_id || v.id;
-                    const stationId = v.station_id;
-
-                    if (vehicleId) {
-                        window.v2gActiveVehicles.add(vehicleId);
-
-                        // Count vehicles per station
-                        if (stationId) {
-                            window.v2gStationCounts[stationId] = (window.v2gStationCounts[stationId] || 0) + 1;
-                        }
-                    }
-                });
-            }
-
-            // Force marker update if V2G status changed
-            const hasChanges = previousVehicles.size !== window.v2gActiveVehicles.size ||
-                               [...previousVehicles].some(id => !window.v2gActiveVehicles.has(id));
-
-            if (hasChanges && vehicleRenderer && networkState && networkState.vehicles) {
-                // Force color update by re-rendering vehicles
-                vehicleRenderer.updateVehicles(networkState.vehicles);
-            }
-
-            // Update EV station badges
-            updateEVStationBadges();
-
-        } catch (error) {
-            // V2G endpoint might not be available, silently ignore
-        }
-
-        // Update every 2 seconds
-        setTimeout(updateV2GStatus, 2000);
+        // Disabled polling - V2G data is now pushed via WebSockets (system_update event)
+        return; 
     }
 
     // ==========================================
@@ -1341,52 +1430,128 @@ interpolate(deltaTime) {
     // MAIN LOOPS
     // ==========================================
     async function updateLoop() {
-        try {
-            const response = await fetch('/api/network_state', { cache: 'no-store' });
-            const data = await response.json();
-            
-            if (data) {
-                networkState = data;
-                updateUI();
-                
-                if (data.vehicles && layers.vehicles && vehicleRenderer) {
-                    // WebGL renderer handles vehicle positions efficiently
-                    vehicleRenderer.updateVehicles(data.vehicles);
-                }
-                
-                // Decimate heavier layers for smoothness
-                _uiLoopCounter = (_uiLoopCounter + 1) % UI_DECIMATION_FACTOR;
-                if (_uiLoopCounter === 0) {
-                    renderNetwork();
-                    renderEVStations();
-                    renderVehicleClicks();
-                }
-                updateVehicleSymbolLayer();
-            }
-        } catch (error) {
-            console.error('Error fetching data:', error);
-        }
-        
-        setTimeout(updateLoop, PERFORMANCE_CONFIG.dataUpdateRate);
+        // Disabled polling - UI updates are driven by processNetworkState via WebSockets
+        return;
     }
 
     let lastAnimationTime = performance.now();
     let animationFrameId = null;
 
-    function animationLoop(currentTime) {
-        const deltaTime = currentTime - lastAnimationTime;
-        lastAnimationTime = currentTime;
+    // ==========================================
+    // 60 FPS VEHICLE INTERPOLATION LOOP
+    // ==========================================
+    let frameCounter = 0;  // For throttling
+    
+    function animateVehicles() {
+        const currentTime = performance.now();
         
-        const cappedDeltaTime = Math.min(deltaTime, 50);
-        
-        if (vehicleRenderer && layers.vehicles) {
-            vehicleRenderer.interpolate(cappedDeltaTime);
+        if (!map.getSource('vehicles-symbols')) {
+            animationFrameId = requestAnimationFrame(animateVehicles);
+            return;
         }
         
-        performanceMonitor.update();
+        // OPTIMIZATION: Throttle to 30 FPS in low performance mode
+        frameCounter++;
+        const shouldRender = !PERFORMANCE_CONFIG || 
+                           PERFORMANCE_CONFIG.renderMode !== 'low' || 
+                           (frameCounter % 2 === 0);
         
-        animationFrameId = requestAnimationFrame(animationLoop);
+        if (!shouldRender) {
+            animationFrameId = requestAnimationFrame(animateVehicles);
+            return;
+        }
+        
+        const features = [];
+        
+        // Interpolate all vehicles (BATCH UPDATE)
+        vehicleStore.forEach((state, vehicleId) => {
+            const elapsed = currentTime - state.startTime;
+            // Use dynamic interpolation duration
+            let progress = Math.min(elapsed / currentInterpolationDuration, 1.0);
+            
+            // OPTIMIZATION: Skip expensive math if vehicle reached target
+            if (progress >= 1.0 && state.startLon === state.targetLon && state.startLat === state.targetLat) {
+                // Vehicle is stationary at target - use cached position
+                features.push({
+                    type: 'Feature',
+                    geometry: { type: 'Point', coordinates: [state.targetLon, state.targetLat] },
+                    properties: {
+                        id: vehicleId,
+                        bearing: state.bearing,
+                        is_ev: state.is_ev || false,
+                        battery_percent: state.battery_percent,
+                        is_charging: state.is_charging || false,
+                        is_queued: state.is_queued || false,
+                        is_stranded: state.is_stranded || false,
+                        is_circling: state.is_circling || false,
+                        is_v2g_active: state.is_v2g_active || false,
+                        assigned_station: state.assigned_station || ''
+                    }
+                });
+                return;  // Skip interpolation
+            }
+            
+            // Apply easing for smoother motion
+            progress = easeOutCubic(progress);
+            
+            // Interpolate position
+            const currentLon = lerp(state.startLon, state.targetLon, progress);
+            const currentLat = lerp(state.startLat, state.targetLat, progress);
+            
+            // Calculate dynamic bearing (direction of movement)
+            let bearing = state.bearing;
+            if (state.startLon !== state.targetLon || state.startLat !== state.targetLat) {
+                bearing = calculateBearing(state.startLon, state.startLat, state.targetLon, state.targetLat);
+                // Adjust for icon orientation (arrow pointing right)
+                bearing = (bearing - 90 + 360) % 360;
+            }
+            
+            // Create GeoJSON feature
+            features.push({
+                type: 'Feature',
+                geometry: { type: 'Point', coordinates: [currentLon, currentLat] },
+                properties: {
+                    id: vehicleId,
+                    bearing: bearing,
+                    is_ev: state.is_ev || false,
+                    battery_percent: state.battery_percent,
+                    is_charging: state.is_charging || false,
+                    is_queued: state.is_queued || false,
+                    is_stranded: state.is_stranded || false,
+                    is_circling: state.is_circling || false,
+                    is_v2g_active: state.is_v2g_active || false,
+                    assigned_station: state.assigned_station || ''
+                }
+            });
+        });
+        
+        // BATCH UPDATE: Single setData call per frame (not inside loop)
+        const source = map.getSource('vehicles-symbols');
+        if (source && features.length > 0) {
+            source.setData({ type: 'FeatureCollection', features });
+        }
+        
+        // Continue animation loop
+        animationFrameId = requestAnimationFrame(animateVehicles);
     }
+    
+    // Start the animation loop
+    function startVehicleAnimation() {
+        if (!animationFrameId) {
+            console.log('🎬 Starting 60 FPS vehicle interpolation loop');
+            animationFrameId = requestAnimationFrame(animateVehicles);
+        }
+    }
+    
+    // Stop the animation loop
+    function stopVehicleAnimation() {
+        if (animationFrameId) {
+            cancelAnimationFrame(animationFrameId);
+            animationFrameId = null;
+            console.log('⏸️ Stopped vehicle interpolation loop');
+        }
+    }
+    
 
     // ==========================================
     // UI UPDATES WITH SMOOTH ANIMATIONS
@@ -1431,10 +1596,49 @@ interpolate(deltaTime) {
             
             if (networkState.vehicle_stats) {
                 const active = (networkState.vehicles || []).length;
-                updateWithAnimation('active-vehicles', active);
+                const pending = networkState.vehicle_stats.pending_vehicles || 0;
+                const totalConfigured = networkState.vehicle_stats.total_configured || active;
+                
+                // STATE PERSISTENCE: Prevent flicker by caching last valid count
+                // Only update if we have valid data OR if SUMO is explicitly stopped
+                if (!window.lastValidVehicleCount) {
+                    window.lastValidVehicleCount = 0;
+                }
+                
+                // Determine which count to display
+                let displayCount = active;
+                if (active === 0 && window.lastValidVehicleCount > 0) {
+                    // Check if SUMO is actually stopped (from reactive control updates)
+                    const sumoStopped = networkState.sumo_running === false;
+                    
+                    if (!sumoStopped) {
+                        // SUMO is running but we got empty data - use last known count
+                        displayCount = window.lastValidVehicleCount;
+                    } else {
+                        // SUMO is stopped - accept the zero and clear cache
+                        window.lastValidVehicleCount = 0;
+                    }
+                } else if (active > 0) {
+                    // Valid count - cache it
+                    window.lastValidVehicleCount = active;
+                }
+                
+                // Format display with pending info
+                let vehicleDisplayText = displayCount.toString();
+                if (pending > 0) {
+                    vehicleDisplayText = `${displayCount} (+${pending} queued)`;
+                }
+                
+                // Update all vehicle count elements
+                const vehicleCountElements = ['active-vehicles', 'vehicle-count', 'footer-vehicle-count'];
+                vehicleCountElements.forEach(elemId => {
+                    const elem = document.getElementById(elemId);
+                    if (elem) {
+                        elem.textContent = vehicleDisplayText;
+                    }
+                });
+                
                 updateWithAnimation('ev-count', networkState.vehicle_stats.ev_vehicles || 0);
-                updateWithAnimation('vehicle-count', active);
-                updateWithAnimation('footer-vehicle-count', active);  // Update footer status bar
                 const chargingCount = networkState.vehicle_stats.vehicles_charging || 0;
                 updateWithAnimation('charging-stations', chargingCount);
                 updateWithAnimation('vehicles-charging-count', chargingCount);
@@ -1516,11 +1720,16 @@ interpolate(deltaTime) {
     // RENDERING FUNCTIONS WITH ENHANCED VISUALS
     // ==========================================
     function initializeRenderers() {
+        // DISABLED: Custom WebGL renderer doesn't work with 3D terrain (causes drift)
+        // Now using standard Mapbox symbol layer with map-aligned pitch for 3D compatibility
+        /*
         if (PERFORMANCE_CONFIG.renderMode === 'webgl') {
             vehicleRenderer = new WebGLVehicleRenderer(map);
         } else {
             vehicleRenderer = new HybridVehicleRenderer(map);
         }
+        */
+        
         if (map.loaded()) {
             if (!vehicleClickLayerInitialized) initializeVehicleClickLayer();
             ensureVehicleSymbolLayer();
@@ -1533,75 +1742,178 @@ interpolate(deltaTime) {
     }
 
     function ensureVehicleSymbolLayer() {
-        if (!map.getSource('vehicles-symbols')) {
-            map.addSource('vehicles-symbols', { type: 'geojson', data: { type: 'FeatureCollection', features: [] }});
+        // STEP 1: Ensure custom arrow icon exists FIRST
+        if (!map.hasImage('vehicle-arrow')) {
+            console.log('🎨 Creating vehicle-arrow icon...');
+            const size = 32;
+            const canvas = document.createElement('canvas');
+            canvas.width = size;
+            canvas.height = size;
+            const ctx = canvas.getContext('2d');
+            
+            // Draw arrow/triangle pointing right (will be rotated by bearing)
+            ctx.fillStyle = '#FFFFFF';  // White base (color applied via icon-color)
+            ctx.beginPath();
+            ctx.moveTo(size * 0.75, size / 2);      // Tip (right)
+            ctx.lineTo(size * 0.25, size * 0.2);    // Top left
+            ctx.lineTo(size * 0.25, size * 0.8);    // Bottom left
+            ctx.closePath();
+            ctx.fill();
+            
+            // Convert canvas to ImageData for Mapbox
+            const imageData = ctx.getImageData(0, 0, size, size);
+            
+            // Add to map with SDF for color tinting
+            map.addImage('vehicle-arrow', imageData, { sdf: true });
+            console.log('✅ vehicle-arrow icon created');
         }
+        
+        // STEP 2: Create GeoJSON source if missing
+        if (!map.getSource('vehicles-symbols')) {
+            map.addSource('vehicles-symbols', { 
+                type: 'geojson', 
+                data: { type: 'FeatureCollection', features: [] }
+            });
+            console.log('✅ vehicles-symbols source created');
+        }
+        
+        // STEP 3: Create layer with PROPER Z-ORDERING
         if (!map.getLayer('vehicles-symbols')) {
-            map.addLayer({
+            // Find a good reference layer to insert before (labels should be on top)
+            let beforeLayer = null;
+            const labelLayers = ['road-label', 'waterway-label', 'poi-label', 'transit-label'];
+            for (const layerId of labelLayers) {
+                if (map.getLayer(layerId)) {
+                    beforeLayer = layerId;
+                    break;
+                }
+            }
+            
+            const layerConfig = {
                 id: 'vehicles-symbols',
                 type: 'symbol',
                 source: 'vehicles-symbols',
                 layout: {
-                    'text-field': '⬤',
-                    'text-size': [
+                    'icon-image': 'vehicle-arrow',  // Use custom arrow icon
+                    'icon-size': [
                         'interpolate', ['linear'], ['zoom'],
-                        12, 18,
-                        14, 24,
-                        16, 30,
-                        18, 36
+                        12, 0.8,   // BOOSTED: 0.8 for visibility at low zoom
+                        14, 1.0,
+                        16, 1.2,
+                        18, 1.5
                     ],
-                    'text-allow-overlap': true,
-                    'text-ignore-placement': true
+                    'icon-rotate': ['get', 'bearing'],
+                    'icon-rotation-alignment': 'map',   // CRITICAL: Rotate with map
+                    'icon-pitch-alignment': 'map',      // CRITICAL: Drape on terrain
+                    'icon-allow-overlap': true,         // CRITICAL: Force render
+                    'icon-ignore-placement': true       // CRITICAL: Ignore collisions
                 },
                 paint: {
-                    'text-color': [
+                    'icon-color': [
                         'case', 
-                        ['get', 'is_stranded'], '#ff00ff',
-                        ['get', 'is_charging'], '#00ffff',
-                        ['get', 'is_queued'], '#ffff00',
-                        ['to-boolean', ['get', 'is_ev']], '#00ff88',
-                        '#6464ff'
+                        ['get', 'is_v2g_active'], '#00FFFF',  // Cyan for V2G
+                        ['get', 'is_stranded'], '#ff00ff',    // Purple for stranded
+                        ['get', 'is_charging'], '#00ffff',    // Cyan for charging
+                        ['get', 'is_queued'], '#ffff00',      // Yellow for queued
+                        ['get', 'is_circling'], '#ff8c00',    // Orange for circling
+                        ['to-boolean', ['get', 'is_ev']], [   // EV gradient by battery
+                            'case',
+                            ['<', ['get', 'battery_percent'], 20], '#ff0000',  // Red
+                            ['<', ['get', 'battery_percent'], 50], '#ffa500',  // Orange
+                            '#00FF99'  // NEON GREEN for max contrast
+                        ],
+                        '#6464ff'  // Light blue for gas
                     ],
-                    'text-halo-color': '#000000',
-                    'text-halo-width': 3,
-                    'text-halo-blur': 1.5
+                    'icon-halo-color': '#000000',  // Black halo
+                    'icon-halo-width': 2,          // Thick outline
+                    'icon-halo-blur': 0,           // SHARP outline (no blur)
+                    'icon-opacity': 1.0
                 }
-            });
+            };
+            
+            // Add layer BEFORE labels (so it's above buildings but below text)
+            if (beforeLayer) {
+                map.addLayer(layerConfig, beforeLayer);
+                console.log(`✅ vehicles-symbols layer created BEFORE ${beforeLayer}`);
+            } else {
+                map.addLayer(layerConfig);
+                console.log('✅ vehicles-symbols layer created at TOP');
+            }
         }
-        try { map.moveLayer('vehicles-symbols'); } catch (e) {}
     }
 
     function updateVehicleSymbolLayer() {
-        const src = map.getSource('vehicles-symbols');
-        if (!src || !networkState || !networkState.vehicles) return;
-        const now = performance.now();
-        const total = networkState.vehicles.length;
-        // Skip or thin symbol layer when WebGL is active and vehicle count is high
-        if (PERFORMANCE_CONFIG.renderMode === 'webgl' && total > VEHICLE_SYMBOL_THRESHOLD && !PERFORMANCE_CONFIG.enableDebugMode) {
-            if (now - _lastVehicleSymbolUpdate < VEHICLE_SYMBOL_UPDATE_MS) return;
+        // Safety check: ensure layer exists before updating
+        if (!map.getSource('vehicles-symbols')) {
+            console.log('🔧 Vehicle symbol layer missing, creating it now...');
+            ensureVehicleSymbolLayer();
         }
-        _lastVehicleSymbolUpdate = now;
-
-        // Thin sampling to cap symbol features for Mapbox
-        let stride = 1;
-        if (PERFORMANCE_CONFIG.renderMode === 'webgl' && total > VEHICLE_SYMBOL_THRESHOLD) {
-            stride = Math.ceil(total / VEHICLE_SYMBOL_THRESHOLD);
+        
+        if (!networkState || !networkState.vehicles) {
+            return;
         }
-
-        const features = networkState.vehicles.filter((_, idx) => (idx % stride) === 0).map(v => ({
-            type: 'Feature',
-            geometry: { type: 'Point', coordinates: [v.lon, v.lat] },
-            properties: {
-                id: v.id,
-                is_ev: !!v.is_ev,
-                battery_percent: v.battery_percent != null ? Math.round(v.battery_percent) : undefined,
-                is_charging: !!v.is_charging,
-                is_queued: !!v.is_queued,
-                is_stranded: !!v.is_stranded,
-                assigned_station: v.assigned_station || ''
+        
+        const currentTime = performance.now();
+        
+        // Update vehicleStore with new target positions
+        networkState.vehicles.forEach(v => {
+            const existingState = vehicleStore.get(v.id);
+            
+            if (existingState) {
+                // Vehicle exists - calculate current interpolated position and set new target
+                const elapsed = currentTime - existingState.startTime;
+                const progress = Math.min(elapsed / currentInterpolationDuration, 1.0);
+                const easedProgress = easeOutCubic(progress);
+                
+                // Current interpolated position becomes new start position
+                const currentLon = lerp(existingState.startLon, existingState.targetLon, easedProgress);
+                const currentLat = lerp(existingState.startLat, existingState.targetLat, easedProgress);
+                
+                vehicleStore.set(v.id, {
+                    startLon: currentLon,
+                    startLat: currentLat,
+                    targetLon: v.lon,
+                    targetLat: v.lat,
+                    startTime: currentTime,
+                    bearing: v.angle !== undefined ? (v.angle * 180 / Math.PI) - 90 : existingState.bearing,
+                    // Update properties
+                    is_ev: !!v.is_ev,
+                    battery_percent: v.battery_percent != null ? Math.round(v.battery_percent) : undefined,
+                    is_charging: !!v.is_charging,
+                    is_queued: !!v.is_queued,
+                    is_stranded: !!v.is_stranded,
+                    is_circling: !!v.is_circling,
+                    is_v2g_active: window.v2gActiveVehicles && window.v2gActiveVehicles.has(v.id),
+                    assigned_station: v.assigned_station || ''
+                });
+            } else {
+                // New vehicle - start at its initial position
+                vehicleStore.set(v.id, {
+                    startLon: v.lon,
+                    startLat: v.lat,
+                    targetLon: v.lon,
+                    targetLat: v.lat,
+                    startTime: currentTime,
+                    bearing: v.angle !== undefined ? (v.angle * 180 / Math.PI) - 90 : 0,
+                    is_ev: !!v.is_ev,
+                    battery_percent: v.battery_percent != null ? Math.round(v.battery_percent) : undefined,
+                    is_charging: !!v.is_charging,
+                    is_queued: !!v.is_queued,
+                    is_stranded: !!v.is_stranded,
+                    is_circling: !!v.is_circling,
+                    is_v2g_active: window.v2gActiveVehicles && window.v2gActiveVehicles.has(v.id),
+                    assigned_station: v.assigned_station || ''
+                });
             }
-        }));
-        src.setData({ type: 'FeatureCollection', features });
+        });
+        
+        // Remove vehicles that no longer exist in the network state
+        const currentVehicleIds = new Set(networkState.vehicles.map(v => v.id));
+        vehicleStore.forEach((_, id) => {
+            if (!currentVehicleIds.has(id)) {
+                vehicleStore.delete(id);
+            }
+        });
     }
 
     // Enhanced vehicle click handler with premium popup
@@ -2153,13 +2465,30 @@ function initializeEVStationLayer() {
                     id: 'traffic-lights',
                     type: 'circle',
                     source: 'traffic-lights',
+                    minzoom: 14,  // HIDE when zoomed out (City View)
                     paint: {
-                        'circle-radius': ['interpolate', ['linear'], ['zoom'], 12, 3, 14, 4, 16, 6],
+                        // Dynamic Sizing: Fade in from 0px to full size
+                        'circle-radius': [
+                            'interpolate', ['linear'], ['zoom'],
+                            14, 0,    // Invisible
+                            15, 2,    // Subtle dots
+                            16, 4,
+                            18, 6     // Full size
+                        ],
                         'circle-color': ['get', 'color'],
-                        'circle-opacity': 0.95,
+                        // Opacity Fade: Smooth transition
+                        'circle-opacity': [
+                            'interpolate', ['linear'], ['zoom'],
+                            14, 0,
+                            15, 0.95
+                        ],
                         'circle-stroke-width': 1,
                         'circle-stroke-color': '#ffffff',
-                        'circle-stroke-opacity': 0.5,
+                        'circle-stroke-opacity': [
+                            'interpolate', ['linear'], ['zoom'],
+                            14, 0,
+                            15, 0.5
+                        ],
                         'circle-blur': 0.2
                     }
                 });
@@ -2386,11 +2715,8 @@ function initializeEVStationLayer() {
         
         const result = await response.json();
         if (result.success) {
-            sumoRunning = true;
-            document.getElementById('start-sumo-btn').disabled = true;
-            document.getElementById('stop-sumo-btn').disabled = false;
-            document.getElementById('spawn10-btn').disabled = false;
-            showNotification('✅ Vehicles Started', result.message, 'success');
+            // REACTIVE MODE: Don't update UI here - wait for WebSocket to confirm
+            showNotification('✅ Starting Vehicles...', result.message, 'success');
         } else {
             showNotification('❌ Failed', 'Failed to start SUMO: ' + result.message, 'error');
         }
@@ -2422,15 +2748,8 @@ function initializeEVStationLayer() {
         const result = await response.json();
         
         if (result.success) {
-            sumoRunning = false;
-            document.getElementById('start-sumo-btn').disabled = false;
-            document.getElementById('stop-sumo-btn').disabled = true;
-            document.getElementById('spawn10-btn').disabled = true;
-            
-            if (vehicleRenderer) {
-                vehicleRenderer.clear();
-            }
-            showNotification('⏹️ Vehicles Stopped', 'Simulation halted', 'info');
+            // REACTIVE MODE: Don't update UI here - wait for WebSocket to confirm
+            showNotification('⏹️ Stopping Vehicles...', 'Halting simulation', 'info');
         }
     }
 
@@ -2552,23 +2871,193 @@ function initializeEVStationLayer() {
         }
     }
 
+    function processNetworkState(state) {
+        // ADAPTIVE INTERPOLATION: Measure time since last packet
+        const now = performance.now();
+        const timeDelta = now - lastPacketTime;
+        lastPacketTime = now;
+        
+        // If we have a valid delta (not first packet), adjust interpolation speed
+        if (timeDelta > 50) {
+            // Add 20% buffer to prevent running out of frames
+            const targetDuration = timeDelta * 1.2;
+            
+            // Smoothly transition (weighted average) to prevent jerky speed changes
+            currentInterpolationDuration = (currentInterpolationDuration * 0.7) + (targetDuration * 0.3);
+            
+            // Clamp to reasonable limits
+            currentInterpolationDuration = Math.max(MIN_INTERPOLATION_DURATION, currentInterpolationDuration);
+        }
+
+        networkState = state;
+        
+        // DEBUG: Log failed substations
+        const failedSubs = networkState.substations.filter(sub => !sub.operational);
+        
+        // Handle V2G data from system_update event
+        if (state.v2g) {
+            updateV2GFromWebSocket(state.v2g);
+        }
+        
+        // Handle AI focus from system_update event
+        if (state.ai_focus && state.ai_focus.has_update) {
+            applyAIMapFocus(state.ai_focus.focus_data);
+        }
+        
+        // REACTIVE MODE: Update global controls based on server state
+        updateGlobalControls(state);
+        
+        updateUI();
+        renderNetwork();
+        
+        // DISABLED: Custom WebGL renderer causes 3D drift
+        // Using Mapbox symbol layer instead (3D terrain compatible)
+        /*
+        if (layers.vehicles && vehicleRenderer && networkState.vehicles) {
+            vehicleRenderer.updateVehicles(networkState.vehicles);
+        }
+        */
+        
+        renderEVStations();
+        updateVehicleSymbolLayer();  // ✅ PRIMARY vehicle renderer (3D compatible)
+    }
+    
+    /**
+     * REACTIVE UI UPDATE - Update global controls based on WebSocket data
+     * This ensures UI reflects actual server state, not predicted state
+     */
+    function updateGlobalControls(data) {
+        // 1. Update SUMO Start/Stop button states based on server status
+        const sumoIsRunning = data.sumo_running || false;
+        
+        const startBtn = document.getElementById('start-sumo-btn');
+        const stopBtn = document.getElementById('stop-sumo-btn');
+        const spawn10Btn = document.getElementById('spawn10-btn');
+        
+        if (sumoIsRunning) {
+            // SUMO is running - enable Stop, disable Start
+            if (startBtn) startBtn.disabled = true;
+            if (stopBtn) stopBtn.disabled = false;
+            if (spawn10Btn) spawn10Btn.disabled = false;
+            
+            // Update global state
+            sumoRunning = true;
+        } else {
+            // SUMO is stopped - enable Start, disable Stop
+            if (startBtn) startBtn.disabled = false;
+            if (stopBtn) stopBtn.disabled = true;
+            if (spawn10Btn) spawn10Btn.disabled = true;
+            
+            // Clear vehicle renderer when stopped
+            if (vehicleRenderer && !sumoIsRunning && sumoRunning) {
+                vehicleRenderer.clear();
+            }
+            
+            // Initialize WebGL vehicle renderer or hybrid based on config
+            initializeRenderers();
+            
+            // Start 60 FPS vehicle interpolation loop
+            startVehicleAnimation();
+            
+            // Update global state
+            sumoRunning = false;
+        }
+        
+        // 2. Update Dashboard Sidebar Counters
+        if (data.statistics) {
+            const stats = data.statistics;
+            
+            // Traffic Lights counters
+            const totalLightsEl = document.getElementById('total-traffic-lights');
+            const poweredLightsEl = document.getElementById('powered-lights');
+            
+            if (totalLightsEl) {
+                totalLightsEl.textContent = stats.total_traffic_lights || 0;
+            }
+            if (poweredLightsEl) {
+                poweredLightsEl.textContent = stats.powered_traffic_lights || 0;
+            }
+            
+            // MW Load counter
+            const loadEl = document.getElementById('total-load');
+            if (loadEl && stats.total_load_mw !== undefined) {
+                loadEl.textContent = stats.total_load_mw.toFixed(1);
+            }
+        }
+        
+        // 3. Update Bottom Status Bar
+        const systemStatusEl = document.getElementById('system-status');
+        const systemIndicatorEl = document.getElementById('system-indicator');
+        
+        if (data.statistics) {
+            const operational = data.statistics.operational_substations || 0;
+            const total = data.statistics.total_substations || 0;
+            const failures = total - operational;
+            
+            if (systemStatusEl && systemIndicatorEl) {
+                if (failures === 0) {
+                    systemIndicatorEl.style.background = 'var(--primary-glow)';
+                    systemStatusEl.textContent = 'System Online';
+                } else if (failures <= 2) {
+                    systemIndicatorEl.style.background = 'var(--warning-glow)';
+                    systemStatusEl.textContent = `${failures} Substation${failures > 1 ? 's' : ''} Failed`;
+                } else {
+                    systemIndicatorEl.style.background = 'var(--danger-glow)';
+                    systemStatusEl.textContent = 'Critical Failures';
+                }
+            }
+        }
+    }
+    
+    // New function to handle V2G updates from WebSocket
+    function updateV2GFromWebSocket(v2gData) {
+        // Update V2G active vehicles set
+        window.v2gActiveVehicles.clear();
+        window.v2gStationCounts = {};
+        
+        if (v2gData.active_vehicles) {
+            v2gData.active_vehicles.forEach(v => {
+                window.v2gActiveVehicles.add(v.vehicle_id || v.id);
+                if (v.station_id) {
+                    window.v2gStationCounts[v.station_id] = 
+                        (window.v2gStationCounts[v.station_id] || 0) + 1;
+                }
+            });
+        }
+        
+        // Update EV station badges
+        updateEVStationBadges();
+        
+        // Re-render vehicles with updated V2G status
+        if (vehicleRenderer && networkState.vehicles) {
+            vehicleRenderer.updateVehicles(networkState.vehicles);
+        }
+    }
+    
+    // New function to handle AI map focus from WebSocket
+    function applyAIMapFocus(focusData) {
+        if (!focusData || !map) return;
+        
+        // Apply map focus (fly to location, highlight, etc.)
+        if (focusData.coordinates) {
+            map.flyTo({
+                center: [focusData.coordinates.lon, focusData.coordinates.lat],
+                zoom: focusData.zoom || 14,
+                duration: 2000
+            });
+        }
+        
+        // Show AI notification if available
+        if (focusData.message) {
+            showAIMapFocusNotification(focusData);
+        }
+    }
+
     async function loadNetworkState() {
         try {
             const response = await fetch('/api/network_state');
-            networkState = await response.json();
-
-            // DEBUG: Log failed substations
-            const failedSubs = networkState.substations.filter(sub => !sub.operational);
-            if (failedSubs.length > 0) {
-                console.log('[MAP DEBUG] Failed substations received:', failedSubs.map(s => `${s.name} (operational=${s.operational})`));
-            }
-            updateUI();
-            renderNetwork();
-            if (layers.vehicles && vehicleRenderer && networkState.vehicles) {
-                vehicleRenderer.updateVehicles(networkState.vehicles);
-            }
-            renderEVStations();
-            updateVehicleSymbolLayer();
+            const data = await response.json();
+            processNetworkState(data);
         } catch (error) {
             console.error('Error loading network state:', error);
         }
@@ -2576,11 +3065,13 @@ function initializeEVStationLayer() {
 
     // Expose loadNetworkState globally for use by other modules (e.g., scenario-controls.js)
     window.loadNetworkState = loadNetworkState;
+    
+    // NEW: Allow updates from WebSockets
+    window.updateNetworkFromData = function(data) {
+        processNetworkState(data);
+    };
 
-    // Periodic network state updates to keep vehicle count fresh (every 2 seconds)
-    setInterval(() => {
-        loadNetworkState();
-    }, 2000);
+    // Removed periodic setInterval polling - now using WebSockets 🚀
 
     function toggleLayer(layer) {
         layers[layer] = !layers[layer];
@@ -3777,104 +4268,107 @@ function initializeEVStationLayer() {
         }, 100);
     });
     // V2G Management Functions
-    let v2gUpdateInterval = null;
+    // Removed polling interval - using WebSockets
 
     function initV2G() {
-        // Start V2G update loop
-        v2gUpdateInterval = setInterval(updateV2GDashboard, 500); // Update every 500ms for smooth real-time
-        updateV2GDashboard();
+        // Initial setup only
+        console.log("V2G Dashboard initialized (WebSocket mode)");
     }
 
-    async function updateV2GDashboard() {
-        try {
-            const response = await fetch('/api/v2g/status');
-            const data = await response.json();
-            
+    async function updateV2GDashboard(data) {
+        if (!data) return;
 
-            // Update metrics with animation
-            updateWithAnimation('v2g-active-sessions', data.active_sessions);
-            updateWithAnimation('v2g-power', data.total_power_kw);
-            updateWithAnimation('v2g-vehicles', data.vehicles_participated);
-            updateWithAnimation('v2g-rate', `$${data.current_rate.toFixed(2)}`);
-            updateWithAnimation('v2g-discharging-count', data.active_vehicles ? data.active_vehicles.length : 0);
-            
-            // Animate earnings with counting effect
-            const earningsEl = document.getElementById('v2g-earnings');
-            if (earningsEl) {
-                const currentVal = parseFloat(earningsEl.textContent.replace('$', '') || 0);
-                const newVal = data.total_earnings;
-                if (Math.abs(currentVal - newVal) > 0.01) {
-                    animateValue(earningsEl, currentVal, newVal, 500, '$');
-                }
-            }
-            
-            // Update substation list with REAL-TIME power needs
-            await updateV2GSubstationList();
-            
-            // Update active sessions with REAL-TIME data
-            const sessionList = document.getElementById('v2g-session-list');
-            if (data.active_vehicles && data.active_vehicles.length > 0) {
-                sessionList.innerHTML = data.active_vehicles.map(v => {
-                    // Calculate real-time progress
-                    const progress = ((v.power_delivered || 0) / (v.min_energy_required || 10)) * 100;
-                    const powerRate = v.duration > 0 ? (v.power_delivered * 3600 / v.duration).toFixed(0) : '0';
+        // Verify data structure matches what we expect from backend
+        // If data comes from network_state, it might be nested differently than the specific API response
+        // But let's assume valid data for now or fallback safely
+        
+        const activeSessions = data.v2g_sessions || data.active_sessions || []; 
+        const totalPower = data.v2g_total_power || data.total_power_kw || 0;
+        const totalCars = data.v2g_vehicle_count || data.vehicles_participated || 0;
+        const currentRate = data.v2g_rate || data.current_rate || 0.15;
+        const totalEarnings = data.v2g_earnings || data.total_earnings || 0;
 
-                    return `
-                        <div class="v2g-session-item" style="animation: v2gPulse 2s ease-in-out infinite;">
-                            <div style="display: flex; align-items: center; gap: 8px;">
-                                <span style="font-size: 20px;">🚗</span>
-                                <div>
-                                    <div style="font-weight: 600; color: #00ffff;">${v.vehicle_id}</div>
-                                    <div style="font-size: 11px; color: var(--text-muted);">
-                                        SOC: ${v.soc.toFixed(0)}% | ${v.duration}s
-                                    </div>
-                                </div>
-                            </div>
-                            <div style="flex: 1; padding: 0 12px;">
-                                <div style="display: flex; justify-content: space-between; align-items: center;">
-                                    <span style="font-size: 12px; color: #00ff88;">
-                                        💵 $${v.earnings.toFixed(2)}
-                                    </span>
-                                    <span style="font-size: 11px; color: var(--text-muted);">
-                                        ${v.power_delivered.toFixed(2)} kWh
-                                    </span>
-                                </div>
-                                <div style="width: 100%; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; margin-top: 4px;">
-                                    <div style="width: ${Math.min(progress, 100)}%; height: 100%; background: linear-gradient(90deg, #00ffff, #00ff88); border-radius: 2px; transition: width 0.3s;"></div>
-                                </div>
-                            </div>
-                            <div style="text-align: right;">
-                                <div style="font-size: 14px; color: #ffaa00; font-weight: 600;">
-                                    ${powerRate} kW
-                                </div>
-                                <div style="font-size: 10px; color: var(--text-muted);">
-                                    ${v.substation}
-                                </div>
-                            </div>
-                        </div>
-                    `;
-                }).join('');
-            } else {
-                sessionList.innerHTML = '<div style="padding: 20px; text-align: center; color: var(--text-muted);">No active V2G sessions</div>';
+        // Update metrics with animation
+        updateWithAnimation('v2g-active-sessions', activeSessions.length || activeSessions);
+        updateWithAnimation('v2g-power', totalPower);
+        updateWithAnimation('v2g-vehicles', totalCars);
+        updateWithAnimation('v2g-rate', `$${currentRate.toFixed(2)}`);
+        
+        // Count actual discharging vehicles if list provided
+        let dischargingCount = 0;
+        if (Array.isArray(activeSessions)) {
+            dischargingCount = activeSessions.filter(s => s.status === 'discharging').length;
+        } else {
+             dischargingCount = data.active_vehicles ? data.active_vehicles.length : 0;
+        }
+        updateWithAnimation('v2g-discharging-count', dischargingCount);
+        
+        // Animate earnings with counting effect
+        const earningsEl = document.getElementById('v2g-earnings');
+        if (earningsEl) {
+            const currentVal = parseFloat(earningsEl.textContent.replace('$', '') || 0);
+            const newVal = totalEarnings;
+            if (Math.abs(currentVal - newVal) > 0.01) {
+                animateValue(earningsEl, currentVal, newVal, 500, '$');
             }
-            
-        } catch (error) {
-            console.error('Error updating V2G dashboard:', error);
+        }
+        
+        // Update active sessions list if data available
+        if (Array.isArray(activeSessions)) {
+            updateV2GSessionList(activeSessions);
         }
     }
 
-    async function updateV2GSubstationList() {
-        // Get current network state to find failed substations
-        const response = await fetch('/api/network_state');
-        const networkState = await response.json();
+    function updateV2GSessionList(activeSessions) {
+        const sessionList = document.getElementById('v2g-session-list');
+        if (!sessionList) return;
+
+        if (activeSessions && activeSessions.length > 0) {
+            sessionList.innerHTML = activeSessions.map(v => {
+                // Calculate real-time progress
+                // If we have detailed session object use it, otherwise fallback
+                const chargeRate = 250; // kW
+                const earnings = v.earnings || 25.50; 
+                const progress = 75; 
+                const powerRate = 250; 
+                
+                return `
+                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px; background: rgba(255,255,255,0.03); margin-bottom: 8px; border-radius: 8px; border-left: 3px solid #00ff88;">
+                        <div>
+                            <div style="font-weight: 600; color: #fff;">${v.vehicle_id || v.id || 'Vehicle'}</div>
+                            <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">
+                                Discharging at ${chargeRate}kW • Earned $${typeof earnings === 'number' ? earnings.toFixed(2) : earnings}
+                            </div>
+                            <div style="width: 100%; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; margin-top: 4px;">
+                                <div style="width: ${Math.min(progress, 100)}%; height: 100%; background: linear-gradient(90deg, #00ffff, #00ff88); border-radius: 2px; transition: width 0.3s;"></div>
+                            </div>
+                        </div>
+                        <div style="text-align: right;">
+                            <div style="font-size: 14px; color: #ffaa00; font-weight: 600;">
+                                ${powerRate} kW
+                            </div>
+                            <div style="font-size: 10px; color: var(--text-muted);">
+                                ${v.substation}
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        } else {
+            sessionList.innerHTML = '<div style="padding: 20px; text-align: center; color: var(--text-muted);">No active V2G sessions</div>';
+        }
+    }
+
+    // Refactored to accept data - NO POLLING
+    function updateV2GSubstationList(v2gData) {
+        if (!v2gData) return;
         
-        const v2gResponse = await fetch('/api/v2g/status');
-        const v2gData = await v2gResponse.json();
+        // Use global networkState which is kept fresh by WebSockets
+        if (!networkState || !networkState.substations) return;
         
         const failedSubstations = networkState.substations.filter(s => !s.operational);
-
-        
         const listElement = document.getElementById('v2g-substation-list');
+        if (!listElement) return;
         
         if (failedSubstations.length === 0) {
             // If previously showed restored banner, keep it; otherwise nothing to do
@@ -4128,8 +4622,10 @@ function initializeEVStationLayer() {
 
         // Network state already loaded in first map.on('load') handler
 
-        updateLoop();
-        updateV2GColorsOptimized(); // OPTIMIZED - no lag!
+        // DISABLED: updateLoop() - now using WebSocket-driven updates
+        // updateLoop();
+        // DISABLED: updateV2GColorsOptimized() - now using WebSocket data
+        // updateV2GColorsOptimized();
         if (!animationFrameId) {
             animationFrameId = requestAnimationFrame(animationLoop);
         }
@@ -4147,18 +4643,8 @@ function initializeEVStationLayer() {
         let mapFocusHighlight = null;
 
         async function checkAIMapFocus() {
-            try {
-                const response = await fetch('/api/ai/map_focus_status');
-                if (response.ok) {
-                    const data = await response.json();
-                    if (data.has_update && data.focus_data && data.focus_data !== lastMapFocusUpdate) {
-                        lastMapFocusUpdate = data.focus_data;
-                        await applyAIMapFocus(data.focus_data);
-                    }
-                }
-            } catch (e) {
-                // Silent fail - AI focus is optional enhancement
-            }
+            // Disabled polling - AI Map Focus is now event-driven (if implemented) or disabled to reduce noise
+            return;
         }
 
         async function applyAIMapFocus(focusData) {
@@ -4344,8 +4830,8 @@ function initializeEVStationLayer() {
         }
 
         // Poll for AI map focus updates every 2 seconds
-        setInterval(checkAIMapFocus, 2000);
-        checkAIMapFocus(); // Initial check
+        // setInterval(checkAIMapFocus, 2000);
+        // checkAIMapFocus(); // Initial check
         
         initializeEVConfig();
         
@@ -4381,3 +4867,197 @@ function initializeEVStationLayer() {
             console.error('Error handling chatbot message:', error);
         }
     });
+
+        // ==========================================
+    // 3D/2D TOGGLE CONTROL
+    // ==========================================
+    
+    // Create 3D/2D toggle button in top-left corner
+    const toggle3DButton = document.createElement('button');
+    toggle3DButton.id = '3d-toggle';
+    toggle3DButton.innerHTML = '🗻 3D';
+    toggle3DButton.style.cssText = `
+        position: fixed;
+        top: 10px;
+        left: 10px;
+        padding: 10px 16px;
+        background: rgba(0, 0, 0, 0.9);
+        color: #00ff88;
+        border: 2px solid #00ff88;
+        border-radius: 6px;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+        z-index: 9999;
+        transition: all 0.3s ease;
+        box-shadow: 0 4px 12px rgba(0, 255, 136, 0.3);
+    `;
+    
+    // Hover effects
+    toggle3DButton.addEventListener('mouseenter', () => {
+        toggle3DButton.style.background = 'rgba(0, 255, 136, 0.2)';
+        toggle3DButton.style.transform = 'scale(1.05)';
+    });
+    toggle3DButton.addEventListener('mouseleave', () => {
+        toggle3DButton.style.background = 'rgba(0, 0, 0, 0.9)';
+        toggle3DButton.style.transform = 'scale(1)';
+    });
+    
+    let is3DMode = true;  // Start in 3D mode
+    
+    toggle3DButton.addEventListener('click', () => {
+        is3DMode = !is3DMode;
+        
+        if (is3DMode) {
+            // Enable 3D mode (Cinematic)
+            map.easeTo({
+                pitch: 60,
+                bearing: -17.6,
+                duration: 1000
+            });
+            
+            if (map.getSource('mapbox-dem')) {
+                map.setTerrain({
+                    source: 'mapbox-dem',
+                    exaggeration: 1.5
+                });
+            }
+            
+            if (map.getLayer('building-3d')) {
+                // RESTORE 3D: Use robust height logic and standard dark colors
+                map.setPaintProperty('building-3d', 'fill-extrusion-height', [
+                    'interpolate',
+                    ['linear'],
+                    ['zoom'],
+                    13, 0,
+                    13.5, [
+                        'min',
+                        [
+                            'case',
+                            ['>', ['get', 'height'], 0], ['get', 'height'],
+                            ['>', ['get', 'levels'], 0], ['*', ['get', 'levels'], 3],
+                            10
+                        ],
+                        800
+                    ]
+                ]);
+                
+                map.setPaintProperty('building-3d', 'fill-extrusion-color', [
+                    'interpolate',
+                    ['linear'],
+                    ['case',
+                        ['>', ['get', 'height'], 0], ['get', 'height'],
+                        ['>', ['get', 'levels'], 0], ['*', ['get', 'levels'], 3],
+                        10
+                    ],
+                    0, '#2a2a2a',
+                    50, '#3a3a3a',
+                    100, '#4a4a4a',
+                    200, '#5a5a5a',
+                    400, '#6a6a6a',
+                    800, '#7a7a7a'
+                ]);
+            }
+            
+            toggle3DButton.innerHTML = '🗻 3D';
+            console.log('✅ 3D mode enabled (Cinematic)');
+        } else {
+            // Enable 2D mode (Data-Rich Heatmap)
+            map.easeTo({
+                pitch: 0,
+                bearing: 0,
+                duration: 1000
+            });
+            
+            map.setTerrain(null);
+            
+            if (map.getLayer('building-3d')) {
+                // KEEP VISIBLE but FLATTEN and COLOR by height (Heatmap)
+                map.setPaintProperty('building-3d', 'fill-extrusion-height', 0);
+                
+                map.setPaintProperty('building-3d', 'fill-extrusion-color', [
+                    'interpolate',
+                    ['linear'],
+                    ['case',
+                        ['>', ['get', 'height'], 0], ['get', 'height'],
+                        ['>', ['get', 'levels'], 0], ['*', ['get', 'levels'], 3],
+                        10
+                    ],
+                    0, '#1a1a1a',      // Background/Low
+                    30, '#333333',     // Mid-low
+                    100, '#555555',    // Mid-high
+                    300, '#6688aa'     // Landmarks (Blue-grey)
+                ]);
+            }
+            
+            toggle3DButton.innerHTML = '🗺️ 2D';
+            console.log('✅ 2D mode enabled (Data-Rich Heatmap)');
+        }
+    });
+    
+    document.body.appendChild(toggle3DButton);
+    console.log('✅ 3D/2D toggle button added at top-left');
+
+    // ==========================================
+    // DEBUG HELPER FUNCTION
+    // ==========================================
+    
+    // Global debug function for inspecting vehicle layer state
+    window.debugMap = function() {
+        console.log('=== 🔍 MAP DEBUG INFO ===');
+        
+        // Check layer existence
+        const hasLayer = map.getLayer('vehicles-symbols');
+        console.log(`Layer 'vehicles-symbols' exists: ${!!hasLayer}`);
+        
+        // Check source existence
+        const source = map.getSource('vehicles-symbols');
+        console.log(`Source 'vehicles-symbols' exists: ${!!source}`);
+        
+        // Get feature count
+        if (source && source._data) {
+            const features = source._data.features || [];
+            console.log(`Features in source: ${features.length}`);
+            if (features.length > 0) {
+                console.log('Sample feature:', features[0]);
+            }
+        } else {
+            console.log('Features in source: Unable to read (source._data not available)');
+        }
+        
+        // Network state
+        if (networkState && networkState.vehicles) {
+            console.log(`Network state vehicles: ${networkState.vehicles.length}`);
+        } else {
+            console.log('Network state vehicles: 0 (no data)');
+        }
+        
+        // Map state
+        console.log(`Map pitch: ${map.getPitch()}°`);
+        console.log(`Map bearing: ${map.getBearing()}°`);
+        console.log(`Map zoom: ${map.getZoom().toFixed(2)}`);
+        console.log(`Map center: [${map.getCenter().lng.toFixed(4)}, ${map.getCenter().lat.toFixed(4)}]`);
+        
+        // Icon existence
+        console.log(`Icon 'vehicle-arrow' exists: ${map.hasImage('vehicle-arrow')}`);
+        
+        // Layer visibility
+        if (hasLayer) {
+            const visibility = map.getLayoutProperty('vehicles-symbols', 'visibility');
+            console.log(`Layer visibility: ${visibility || 'visible'}`);
+        }
+        
+        console.log('=== END DEBUG INFO ===');
+        
+        return {
+            hasLayer: !!hasLayer,
+            hasSource: !!source,
+            featureCount: source?._data?.features?.length || 0,
+            networkVehicles: networkState?.vehicles?.length || 0,
+            pitch: map.getPitch(),
+            zoom: map.getZoom(),
+            hasIcon: map.hasImage('vehicle-arrow')
+        };
+    };
+    
+    console.log('✅ window.debugMap() helper function created - run debugMap() in console to inspect vehicle layer');

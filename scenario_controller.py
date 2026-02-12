@@ -99,11 +99,12 @@ class ScenarioController:
     World-class scenario controller for testing Manhattan power grid
     """
 
-    def __init__(self, integrated_system, load_model, power_grid, sumo_manager=None):
+    def __init__(self, integrated_system, load_model, power_grid, sumo_manager=None, on_update_callback=None):
         self.integrated_system = integrated_system
         self.load_model = load_model
         self.power_grid = power_grid
         self.sumo_manager = sumo_manager
+        self.on_update_callback = on_update_callback
 
         # Scenario parameters - REALISTIC TIME SYSTEM
         self.current_time_seconds = 12 * 3600  # Time in seconds since midnight (0-86400)
@@ -450,6 +451,13 @@ class ScenarioController:
                     self.load_model.set_time_of_day(hour_float)
 
                 self._update_all_loads()
+                
+                # Broadcast update via WebSocket if callback exists
+                if self.on_update_callback:
+                    try:
+                        self.on_update_callback(self.get_system_status())
+                    except Exception as e:
+                        print(f"Callback error: {e}")
 
                 time.sleep(1)  # Update every real second
 

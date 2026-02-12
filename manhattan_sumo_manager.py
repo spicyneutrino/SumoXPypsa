@@ -88,17 +88,22 @@ class ManhattanSUMOManager:
         if not self.station_manager:
             return None
         
-        # Get vehicle position
+        # Get vehicle position and current edge
         try:
             x, y = traci.vehicle.getPosition(vehicle_id)
             vehicle_lon, vehicle_lat = traci.simulation.convertGeo(x, y)
+            vehicle_edge = traci.vehicle.getRoadID(vehicle_id)
+            
+            # Skip if on internal/junction edge
+            if vehicle_edge.startswith(':'):
+                return None
         except:
             return None
         
         best_station = None
         min_distance = float('inf')
         
-        # Check ALL stations and find the nearest one
+        # Check ALL stations and find the nearest REACHABLE one
         for station_id, station in self.station_manager.stations.items():
             # Check if station is operational
             if not station['operational']:
@@ -120,9 +125,39 @@ class ManhattanSUMOManager:
                 station_info['lat'], station_info['lon']
             )
             
-            if dist < min_distance:
-                min_distance = dist
-                best_station = station_id
+            # CRITICAL: Reachability check - verify route exists
+            try:
+                # Get station edge from SUMO location
+                station_x, station_y = traci.simulation.convertGeo(
+                    station_info['lon'], station_info['lat'], 
+                    fromGeo=True
+                )
+                station_edges = traci.simulation.convertRoad(
+                    station_x, station_y, 
+                    isGeo=False
+                )
+                
+                if not station_edges or len(station_edges) == 0:
+                    continue  # No edge found for station
+                
+                station_edge = station_edges[0]
+                
+                # Verify route exists from vehicle to station
+                route_result = traci.simulation.findRoute(vehicle_edge, station_edge)
+                
+                # Check if route is valid (cost != -1 and has edges)
+                if not route_result or not route_result.edges or len(route_result.edges) == 0:
+                    # No valid route - skip this station
+                    continue
+                
+                # Route exists! Consider this station
+                if dist < min_distance:
+                    min_distance = dist
+                    best_station = station_id
+                    
+            except Exception as e:
+                # Route verification failed - skip this station
+                continue
         
         return best_station
 
@@ -467,15 +502,36 @@ class ManhattanSUMOManager:
         attempts = 0
         max_attempts = count * 10  # Allow many attempts to get exact count
         
-        # Get ALL valid edges from SUMO
+        # Get valid edges from SUMO - only those that allow passenger vehicles
         all_edges = traci.edge.getIDList()
-        valid_edges = [e for e in all_edges if not e.startswith(':') and traci.edge.getLaneNumber(e) > 0]
+        valid_edges = []
+        
+        for edge_id in all_edges:
+            # Skip internal/junction edges
+            if edge_id.startswith(':'):
+                continue
+            
+            # Check if edge has lanes
+            if traci.edge.getLaneNumber(edge_id) == 0:
+                continue
+            
+            # CRITICAL: Check if edge allows passenger vehicles
+            try:
+                # Get allowed vehicle classes for the edge
+                allowed = traci.edge.getAllowed(edge_id)
+                # If empty, all vehicle types are allowed
+                # If not empty, check if 'passenger' is in the list
+                if not allowed or 'passenger' in allowed:
+                    valid_edges.append(edge_id)
+            except:
+                # If we can't determine, assume it's valid
+                valid_edges.append(edge_id)
         
         if not valid_edges:
             print("ERROR: No valid edges found in SUMO network")
             return 0
         
-        print(f"Spawning {count} vehicles using {len(valid_edges)} valid edges...")
+        print(f"Spawning {count} vehicles using {len(valid_edges)} passenger-accessible edges...")
         
         # Keep trying until we get the exact count
         while spawned < count and attempts < max_attempts:
@@ -514,8 +570,9 @@ class ManhattanSUMOManager:
                         else:
                             continue
                     
-                    # Try to find route
-                    route_result = traci.simulation.findRoute(origin, destination)
+                    # CRITICAL FIX: Use findRoute with vType to validate departure edge permissions
+                    # This checks if the vehicle TYPE can actually depart from the origin edge
+                    route_result = traci.simulation.findRoute(origin, destination, vType=vtype)
                     
                     if route_result and route_result.edges and len(route_result.edges) > 0:
                         # Valid route found!
@@ -524,13 +581,20 @@ class ManhattanSUMOManager:
                         # Add route
                         traci.route.add(route_id, route_result.edges)
                         
-                        # Add vehicle
-                        traci.vehicle.add(
-                            vehicle_id,
-                            route_id,
-                            typeID=vtype,
-                            depart="now"
-                        )
+                        # Add vehicle with explicit departure checking
+                        try:
+                            traci.vehicle.add(
+                                vehicle_id,
+                                route_id,
+                                typeID=vtype,
+                                depart="now"
+                            )
+                        except Exception as e:
+                            # If departure fails, remove the edge from valid_edges
+                            if origin in valid_edges:
+                                valid_edges.remove(origin)
+                            print(f"  Departure failed on edge {origin}: {str(e)}, removed from valid edges")
+                            continue
                         
                         # Set REALISTIC Manhattan speeds and COLLISION PREVENTION
                         traci.vehicle.setMaxSpeed(vehicle_id, 13.9)  # 50 km/h (31 mph) - realistic city speed
