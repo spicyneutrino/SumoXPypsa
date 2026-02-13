@@ -296,10 +296,20 @@
         enableDebugMode: window.location.hash === '#debug'
     };
 
-    // ==========================================
-    // MAPBOX INITIALIZATION WITH PREMIUM SETTINGS
-    // ==========================================
-    mapboxgl.accessToken = 'YOUR_MAPBOX_ACCESS_TOKEN_HERE';
+    // Load Mapbox token from backend (served from MAPBOX_TOKEN env var)
+    let _mapboxToken = '';
+    try {
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', '/api/config', false);  // synchronous — must complete before map init
+        xhr.send();
+        if (xhr.status === 200) {
+            const config = JSON.parse(xhr.responseText);
+            _mapboxToken = config.mapbox_token || '';
+        }
+    } catch (e) {
+        console.warn('Could not fetch config, using fallback token');
+    }
+    mapboxgl.accessToken = _mapboxToken || 'YOUR_MAPBOX_ACCESS_TOKEN_HERE';
 
     const map = new mapboxgl.Map({
         container: 'map',
@@ -4131,45 +4141,9 @@ function initializeEVStationLayer() {
 
         input.value = '';
 
-        // **WORLD-CLASS LLM SCENARIO PROCESSING**
-        // First check if this is a scenario command
-        if (window.llmScenarioHandler) {
-            window.llmScenarioHandler.processCommand(text).then(result => {
-                if (result !== null) {
-                    // Scenario command was handled
-                    let responseHtml = `<div class="msg ai" style="margin:10px 0;padding:16px 20px;background:linear-gradient(135deg,rgba(15,25,45,0.95),rgba(20,30,50,0.92));border-radius:16px;border:1px solid rgba(0,255,136,0.3);box-shadow:0 4px 16px rgba(0,255,136,0.15), inset 0 1px 0 rgba(255,255,255,0.1);position:relative;overflow:hidden;">`;
-                    responseHtml += `<div style="position:absolute;top:0;left:0;width:4px;height:100%;background:linear-gradient(180deg,#00ff88,#00d4ff);box-shadow:0 0 12px rgba(0,255,136,0.5);"></div>`;
-                    responseHtml += `<strong style="color:#00ff88;display:flex;align-items:center;margin-bottom:10px;font-size:14px;letter-spacing:0.3px;"><svg width="18" height="18" style="margin-right:8px;" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 5.58 2 10c0 2.39 1.31 4.53 3.4 6.01-.14.52-.51 1.89-.59 2.24-.09.37.13.73.5.82.26.06.52-.03.7-.21.28-.27 1.25-1.2 1.77-1.7.79.22 1.63.34 2.52.34 5.52 0 10-3.58 10-8s-4.48-8-10-8Z"/></svg>Ultra-Intelligent AI</strong>`;
-                    responseHtml += `<div style="line-height:1.7;color:rgba(255,255,255,0.95);font-size:14px;padding-left:26px;" class="markdown-content">${window.renderMarkdown(result.message)}</div>`;
-
-                    // Add suggestions if available
-                    if (result.suggestions && result.suggestions.length > 0) {
-                        responseHtml += `<div style="margin-top:12px;padding-left:26px;"><div style="font-size:12px;color:#00ffcc;margin-bottom:6px;">💡 Suggested test scenarios:</div>`;
-                        responseHtml += `<div style="display:flex;flex-wrap:wrap;gap:6px;">`;
-                        result.suggestions.forEach(suggestion => {
-                            const scenarioKey = suggestion.key;
-                            const scenario = window.llmScenarioHandler.testScenarios[scenarioKey];
-                            if (scenario) {
-                                // Send the scenario KEY, not the full description
-                                responseHtml += `<button onclick="sendSuggestion('${scenarioKey.replace(/_/g, ' ')}')" style="padding:6px 12px;background:rgba(0,123,255,0.3);border:1px solid rgba(0,123,255,0.5);border-radius:12px;color:white;font-size:11px;cursor:pointer;transition:all 0.2s;" onmouseover="this.style.background='rgba(0,123,255,0.6)'" onmouseout="this.style.background='rgba(0,123,255,0.3)'">${scenario.icon} ${scenarioKey.replace(/_/g, ' ')}</button>`;
-                            }
-                        });
-                        responseHtml += `</div></div>`;
-                    }
-
-                    responseHtml += `</div>`;
-                    box.innerHTML += responseHtml;
-                    box.scrollTop = box.scrollHeight;
-                    return;
-                }
-
-                // Not a scenario command, proceed with normal AI chat
-                proceedWithNormalChat(text, box);
-            });
-        } else {
-            // Scenario handler not available, proceed with normal chat
-            proceedWithNormalChat(text, box);
-        }
+        // ALL commands are now processed by the backend agentic chatbot.
+        // Frontend interception (llmScenarioHandler) is bypassed.
+        proceedWithNormalChat(text, box);
     }
 
     // Separated normal chat logic

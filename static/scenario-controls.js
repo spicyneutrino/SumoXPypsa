@@ -966,6 +966,76 @@ class ScenarioControllerUI {
             this.handleSystemUpdate(data);
         });
 
+        // --- AGENTIC CHATBOT EVENTS ---
+        // These are emitted by the agentic chatbot when it executes tools
+
+        this.socket.on('scenario_time_update', (data) => {
+            console.log('[Agentic] Time update:', data);
+            if (data.hour !== undefined) {
+                const time = data.hour + (data.minute || 0) / 60;
+                this.currentTime = time;
+                const timeSlider = document.getElementById('time-slider');
+                if (timeSlider) timeSlider.value = time;
+                this.updateTimeDisplay(time);
+            }
+        });
+
+        this.socket.on('scenario_temp_update', (data) => {
+            console.log('[Agentic] Temperature update:', data);
+            if (data.temperature !== undefined) {
+                this.currentTemperature = data.temperature;
+                const tempSlider = document.getElementById('temperature-slider');
+                if (tempSlider) tempSlider.value = data.temperature;
+                const tempDisplay = document.getElementById('temperature-value');
+                if (tempDisplay) tempDisplay.textContent = `${Math.round(data.temperature)}°F`;
+            }
+        });
+
+        this.socket.on('simulation_speed_update', (data) => {
+            console.log('[Agentic] Speed update:', data);
+            if (data.speed !== undefined) {
+                const speedSlider = document.getElementById('speed-slider');
+                if (speedSlider) speedSlider.value = data.speed;
+                const speedDisplay = document.getElementById('speed-value');
+                if (speedDisplay) speedDisplay.textContent = `${data.speed}x`;
+            }
+        });
+
+        this.socket.on('substation_update', (data) => {
+            console.log('[Agentic] Substation update:', data);
+            // Trigger a network state refresh
+            if (window.loadNetworkState) window.loadNetworkState();
+        });
+
+        this.socket.on('v2g_update', (data) => {
+            console.log('[Agentic] V2G update:', data);
+            if (window.loadNetworkState) window.loadNetworkState();
+        });
+
+        this.socket.on('simulation_state_update', (data) => {
+            console.log('[Agentic] Simulation state:', data);
+            if (window.loadNetworkState) window.loadNetworkState();
+        });
+
+        this.socket.on('ai_map_focus', (data) => {
+            console.log('[Agentic] Map focus:', data);
+            if (data && data.coordinates && window.map) {
+                const coords = Array.isArray(data.coordinates)
+                    ? data.coordinates
+                    : [data.coordinates.lon || data.coordinates[0], data.coordinates.lat || data.coordinates[1]];
+                window.map.flyTo({
+                    center: coords,
+                    zoom: data.zoom || 16,
+                    duration: 2000
+                });
+            }
+        });
+
+        this.socket.on('scenario_change', (data) => {
+            console.log('[Agentic] Scenario change:', data);
+            if (window.loadNetworkState) window.loadNetworkState();
+        });
+
         // Initial fetch just to be safe
         setTimeout(() => this.updateStatus(), 500);
     }

@@ -295,6 +295,36 @@ except Exception as e:
     load_model = None
     scenario_controller = None
 
+# Initialize AGENTIC CHATBOT — OpenAI function calling with tool executor
+try:
+    from agentic_tools import ToolExecutor
+    from agentic_chatbot import AgenticChatbot
+
+    tool_executor = ToolExecutor(
+        integrated_system=integrated_system,
+        v2g_manager=v2g_manager,
+        sumo_manager=sumo_manager,
+        power_grid=power_grid,
+        system_state=system_state,
+        scenario_controller=scenario_controller,
+        current_ev_config=current_ev_config if 'current_ev_config' in dir() else {},
+        vehicle_spawn_queue=vehicle_spawn_queue
+    )
+    agentic_chatbot = AgenticChatbot(
+        tool_executor=tool_executor,
+        integrated_system=integrated_system,
+        v2g_manager=v2g_manager,
+        system_state=system_state,
+        socketio=socketio,
+        scenario_controller=scenario_controller
+    )
+    print(f"✓ AGENTIC CHATBOT INITIALIZED — {agentic_chatbot.get_tool_count()} tools available")
+except Exception as e:
+    print(f"Agentic Chatbot not available: {e}")
+    import traceback
+    traceback.print_exc()
+    agentic_chatbot = None
+
 # Optional: cache of SUMO edge shapes (lon/lat) for road-locked rendering
 EDGE_SHAPES: dict = {}
 
@@ -384,6 +414,7 @@ def simulation_loop():
     print(f"EV Load Update:         {EV_LOAD_UPDATE}s (Smart meter rate)")
     print(f"V2G State Update:       {V2G_UPDATE}s (V2G session rate)")
     print("="*70 + "\n")
+
 
     # BROADCAST OPTIMIZATION
     BROADCAST_INTERVAL = 5  # Send 1 update per 5 physics steps
@@ -782,6 +813,13 @@ sim_thread.start()
 def index():
     """Serve complete dashboard with all features"""
     return render_template_string(load_html_template())
+
+@app.route('/api/config')
+def get_config():
+    """Serve client-side configuration (Mapbox token, etc.) from environment."""
+    return jsonify({
+        'mapbox_token': os.environ.get('MAPBOX_TOKEN', ''),
+    })
 
 @app.route('/api/debug/buses')
 def debug_buses():
@@ -1841,78 +1879,75 @@ def ai_predict():
 
 @app.route('/api/ai/chat', methods=['POST'])
 def ai_chat():
-    """WORLD-CLASS AI CHAT - True system control and intelligence."""
+    """AI CHAT — Agentic tool-calling with fallback chain."""
     from datetime import datetime
+    import asyncio
     try:
         body = request.get_json() or {}
         message = body.get('message', '')
-        user_id = body.get('user_id', 'system_operator')
+        user_id = body.get('user_id', 'web_user')
 
         if not message:
             return jsonify({'error': 'Message is required'}), 400
 
-        # FORCE USE ULTRA-INTELLIGENT CHATBOT - PRIORITY #1 (With typo correction)
-        print(f"[DEBUG] Processing message: {message}")
-        print(f"[DEBUG] ultra_chatbot available: {ultra_chatbot is not None}")
-        print(f"[DEBUG] world_class_ai available: {world_class_ai is not None}")
-
-        # TRY ULTRA-INTELLIGENT CHATBOT FIRST (with typo correction and suggestions)
-        print(f"[API /ai/chat] ultra_chatbot exists: {ultra_chatbot is not None}")
-        if ultra_chatbot:
-            print(f"[DEBUG] ✅ ROUTING TO ULTRA-INTELLIGENT CHATBOT for message: {message}")
+        # PRIORITY 1: AGENTIC CHATBOT (OpenAI function calling)
+        if 'agentic_chatbot' in globals() and agentic_chatbot and agentic_chatbot.is_available():
+            print(f"[API /ai/chat] → AGENTIC CHATBOT: {message}")
             try:
-                import asyncio
-                user_id = body.get('user_id', 'web_user')
-                print(f"[DEBUG] Calling ultra_chatbot.chat() with message='{message}', user_id='{user_id}'")
-                ai_response = asyncio.run(ultra_chatbot.chat(message, user_id=user_id))
-                print(f"[DEBUG] Ultra-Intelligent Chatbot SUCCESS: {ai_response}")
+                ai_response = asyncio.run(agentic_chatbot.chat(message, user_id=user_id))
 
-                # CRITICAL FIX: Ensure proper response format for scenario-director.js
-                # Ultra chatbot returns {'text': ...}, but scenario expects {'response': ...}
+                # Check if agentic chatbot wants to fall back
+                if ai_response.get('fallback'):
+                    print(f"[API /ai/chat] Agentic chatbot requested fallback")
+                    raise Exception("Agentic fallback requested")
+
                 response_text = ai_response.get('text', '') if isinstance(ai_response, dict) else str(ai_response)
                 return jsonify({
                     'status': 'success',
                     'response': response_text,
-                    'full_data': ai_response  # Include full response for debugging
+                    'full_data': ai_response
                 })
             except Exception as e:
-                print(f"[ERROR] Ultra-Intelligent Chatbot error: {e}")
+                print(f"[API /ai/chat] Agentic chatbot error: {e}")
                 import traceback
                 traceback.print_exc()
-                # Fallback to world-class AI if ultra chatbot fails
+                # Fall through to ultra_chatbot
 
-        # FALLBACK TO WORLD-CLASS AI CONTROLLER
+        # PRIORITY 2: ULTRA-INTELLIGENT CHATBOT (rule-based fallback)
+        if ultra_chatbot:
+            print(f"[API /ai/chat] → ULTRA CHATBOT (fallback): {message}")
+            try:
+                ai_response = asyncio.run(ultra_chatbot.chat(message, user_id=user_id))
+                response_text = ai_response.get('text', '') if isinstance(ai_response, dict) else str(ai_response)
+                return jsonify({
+                    'status': 'success',
+                    'response': response_text,
+                    'full_data': ai_response
+                })
+            except Exception as e:
+                print(f"[API /ai/chat] Ultra chatbot error: {e}")
+                import traceback
+                traceback.print_exc()
+
+        # PRIORITY 3: WORLD-CLASS AI CONTROLLER (last resort)
         if world_class_ai:
-            print(f"[DEBUG] ROUTING TO WORLD-CLASS AI for message: {message}")
+            print(f"[API /ai/chat] → WORLD-CLASS AI (last resort): {message}")
             try:
                 ai_response = world_class_ai.process_intelligent_command(message)
-                print(f"[DEBUG] World-class AI SUCCESS: {ai_response}")
                 return jsonify(ai_response)
             except Exception as e:
-                print(f"[ERROR] World-class AI error: {e}")
-                import traceback
-                traceback.print_exc()
-                # Even if there's an error, still try to use world-class AI fallback
+                print(f"[API /ai/chat] World-class AI error: {e}")
                 return jsonify({
-                    'text': f'[ERROR] Command failed: {str(e)}\\n\\nTry: "Turn off Times Square substation", "Show me Penn Station area", "System status"',
+                    'text': f'Command failed: {str(e)}',
                     'type': 'error',
-                    'intent': 'system_control',
-                    'confidence': 0.5,
-                    'system_controlled': False,
                     'timestamp': datetime.now().isoformat()
                 })
-        else:
-            print(f"[CRITICAL] World-class AI NOT AVAILABLE - this should never happen!")
-            return jsonify({
-                'text': 'CRITICAL ERROR: World-class AI controller not initialized',
-                'type': 'error',
-                'intent': 'system_error',
-                'confidence': 0.0,
-                'system_controlled': False,
-                'timestamp': datetime.now().isoformat()
-            })
 
-        # This should never be reached - world-class AI should always be available
+        return jsonify({
+            'text': 'No AI system available. Please check configuration.',
+            'type': 'error',
+            'timestamp': datetime.now().isoformat()
+        })
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
