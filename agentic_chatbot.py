@@ -152,6 +152,9 @@ class AgenticChatbot:
                 vehicle_text = "Running (stats unavailable)"
 
         # --- Build the prompt ---
+        substation_names = ', '.join(self.integrated_system.substations.keys())
+        ev_station_ids = ', '.join(self.integrated_system.ev_stations.keys())
+
         return f"""You are the Manhattan Power Grid AI Controller — an expert system managing NYC's electrical infrastructure.
 
 ═══════════════════════════════════════════════
@@ -168,10 +171,16 @@ Time: {time_str} | Temperature: {temp_str}
 {"⚠️ FAILED SUBSTATIONS: " + ", ".join(failed_list) if failed_list else "✅ All substations operational"}
 ═══════════════════════════════════════════════
 
+VALID NAMES (use these exact strings in tool calls):
+  Substations: {substation_names}
+  EV Stations: {ev_station_ids}
+  Map Layers: lights, primary, secondary, vehicles, ev, substations
+
 CAPABILITIES:
 You have full control over the Manhattan power grid through the tools provided.
 You can control substations, manage V2G, run simulations, set time/temperature,
-focus the map, and query system status.
+focus the map, toggle map layers, control individual EV stations, trigger blackouts,
+and query system status.
 
 RULES:
 1. Use tools for ALL actions — never pretend to execute commands without tools
@@ -180,8 +189,8 @@ RULES:
 4. If a tool fails, explain why and suggest alternatives
 5. For status queries, use get_system_status or get_scenario_status tools
 6. Be concise but thorough — include numbers and specifics
-7. For ambiguous substation names, try to fuzzy-match (e.g. "times sq" → "Times Square")
-8. When the user asks about the system, use tools to get fresh data rather than guessing
+7. When the user asks about the system, use tools to get fresh data rather than guessing
+8. When showing infrastructure, use toggle_map_layer to highlight relevant layers
 """
 
     # =========================================================================
@@ -296,9 +305,20 @@ RULES:
             # 4. Get final text response
             final_text = response.choices[0].message.content or "Action completed."
 
-            # 5. Update conversation history
+            # 5. Update conversation history (including tool calls for memory)
             self.conversation_history.append({"role": "user", "content": user_input})
-            self.conversation_history.append({"role": "assistant", "content": final_text})
+            # Store tool call summaries so the LLM remembers what it did
+            if tool_results:
+                tool_summary = "; ".join(
+                    f"{t['tool']}({t['args']}) → {'✓' if t['result'].get('success') else '✗'}"
+                    for t in tool_results
+                )
+                self.conversation_history.append({
+                    "role": "assistant",
+                    "content": f"[Tools executed: {tool_summary}]\n\n{final_text}"
+                })
+            else:
+                self.conversation_history.append({"role": "assistant", "content": final_text})
 
             # Trim history
             if len(self.conversation_history) > self.max_history * 2:
@@ -392,6 +412,48 @@ RULES:
                     'scenario': tool_args.get('scenario'),
                     'result': {k: v for k, v in result.items()
                                if k in ('success', 'scenario', 'message')}
+                })
+
+            elif tool_name == "configure_ev" and result.get("success"):
+                # Push updated EV config to frontend so sliders update
+                self.socketio.emit('ev_config_update', {
+                    'ev_percentage': tool_args.get('ev_percentage', 70),
+                    'battery_min_soc': tool_args.get('battery_min_soc', 20),
+                    'battery_max_soc': tool_args.get('battery_max_soc', 90),
+                })
+
+            elif tool_name == "spawn_vehicles" and result.get("success"):
+                self.socketio.emit('vehicles_spawned', {
+                    'count': tool_args.get('count', 0),
+                    'message': result.get('message', '')
+                })
+
+            elif tool_name == "toggle_map_layer" and result.get("success"):
+                self.socketio.emit('layer_toggle', {
+                    'layer': tool_args.get('layer'),
+                    'visible': tool_args.get('visible'),
+                })
+
+            elif tool_name == "set_map_view" and result.get("success"):
+                self.socketio.emit('map_view_change', {
+                    'mode': result.get('mode'),
+                    'pitch': result.get('pitch'),
+                    'bearing': result.get('bearing'),
+                })
+
+            elif tool_name in ("fail_ev_station", "restore_ev_station") and result.get("success"):
+                # Refresh network state so the frontend picks up the change
+                self.socketio.emit('ev_station_update', {
+                    'station_id': result.get('station_id'),
+                    'action': 'failed' if tool_name == 'fail_ev_station' else 'restored',
+                })
+
+            elif tool_name == "trigger_blackout" and result.get("success"):
+                # Bulk substation failure — refresh the entire network
+                self.socketio.emit('substation_update', {
+                    'action': 'blackout',
+                    'failed': result.get('failed_substations', []),
+                    'spare': result.get('spare_substation'),
                 })
 
         except Exception as e:

@@ -1036,6 +1036,63 @@ class ScenarioControllerUI {
             if (window.loadNetworkState) window.loadNetworkState();
         });
 
+        this.socket.on('ev_config_update', (data) => {
+            console.log('[Agentic] EV config update:', data);
+            // Update the EV sliders on the frontend
+            if (data.ev_percentage !== undefined && window.updateEVPercentage) {
+                const slider = document.getElementById('ev-percentage-slider');
+                if (slider) slider.value = data.ev_percentage;
+                window.updateEVPercentage(data.ev_percentage);
+            }
+            if (data.battery_min_soc !== undefined) {
+                const minSlider = document.getElementById('battery-min-slider');
+                if (minSlider) minSlider.value = data.battery_min_soc;
+            }
+            if (data.battery_max_soc !== undefined) {
+                const maxSlider = document.getElementById('battery-max-slider');
+                if (maxSlider) maxSlider.value = data.battery_max_soc;
+            }
+            if (window.updateBatteryRange) window.updateBatteryRange();
+        });
+
+        this.socket.on('vehicles_spawned', (data) => {
+            console.log('[Agentic] Vehicles spawned:', data);
+            if (window.loadNetworkState) window.loadNetworkState();
+        });
+
+        this.socket.on('layer_toggle', (data) => {
+            console.log('[Agentic] Layer toggle:', data);
+            if (window.toggleLayer && data.layer) {
+                // toggleLayer is a toggle, so we need to check current state first
+                // For now, just call it — the chatbot's visible flag is advisory
+                window.toggleLayer(data.layer);
+                // Update the toggle checkbox UI
+                const toggle = document.getElementById(`layer-${data.layer}`);
+                if (toggle) toggle.checked = data.visible;
+            }
+        });
+
+        this.socket.on('ev_station_update', (data) => {
+            console.log('[Agentic] EV station update:', data);
+            if (window.loadNetworkState) window.loadNetworkState();
+        });
+
+        this.socket.on('substation_update', (data) => {
+            console.log('[Agentic] Substation update (blackout):', data);
+            if (window.loadNetworkState) window.loadNetworkState();
+        });
+
+        this.socket.on('map_view_change', (data) => {
+            console.log('[Agentic] Map view change:', data);
+            if (window.map) {
+                window.map.easeTo({
+                    pitch: data.pitch ?? 0,
+                    bearing: data.bearing ?? 0,
+                    duration: 1500
+                });
+            }
+        });
+
         // Initial fetch just to be safe
         setTimeout(() => this.updateStatus(), 500);
     }

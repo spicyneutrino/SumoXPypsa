@@ -2708,6 +2708,11 @@ function initializeEVStationLayer() {
         updateBatteryRange();
     }
 
+    // Expose EV config functions globally so agentic chatbot socket events can update sliders
+    window.updateEVPercentage = updateEVPercentage;
+    window.updateBatteryRange = updateBatteryRange;
+    window.toggleLayer = toggleLayer;
+
     // ==========================================
     // CONTROL FUNCTIONS
     // ==========================================

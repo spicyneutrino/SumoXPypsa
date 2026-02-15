@@ -555,7 +555,7 @@ class ScenarioController:
             'timestamp': datetime.now().isoformat(),
             'type': event_type,
             'description': description,
-            'time': self.current_time,
+            'time': self._format_time(self.current_time_seconds),
             'temperature': self.current_temperature
         }
         self.event_log.append(event)

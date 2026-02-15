@@ -525,6 +525,12 @@ class ManhattanPowerGrid:
         # Get line flows
         line_flows = self.network.lines_t.p0.iloc[0]
         line_limits = self.network.lines.s_nom
+        
+        # Align indices to ensure safe arithmetic
+        common_idx = line_flows.index.intersection(line_limits.index)
+        line_flows = line_flows.loc[common_idx]
+        line_limits = line_limits.loc[common_idx]
+        
         line_loading = abs(line_flows) / line_limits
         
         # Find violations
@@ -886,6 +892,12 @@ class ManhattanPowerGrid:
         # Deduct for overloaded lines
         line_flows = abs(self.network.lines_t.p0.iloc[0])
         line_limits = self.network.lines.s_nom
+        
+        # Align indices
+        common_idx = line_flows.index.intersection(line_limits.index)
+        line_flows = line_flows.loc[common_idx]
+        line_limits = line_limits.loc[common_idx]
+        
         overloads = (line_flows > line_limits).sum()
         score -= overloads * 10
         

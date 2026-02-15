@@ -404,6 +404,122 @@ TOOL_DEFINITIONS = [
             }
         }
     },
+
+    # -------------------------------------------------------------------------
+    # MAP LAYER CONTROL
+    # -------------------------------------------------------------------------
+    {
+        "type": "function",
+        "function": {
+            "name": "toggle_map_layer",
+            "description": "Show or hide a map visualization layer. Useful for focusing the user's attention on specific infrastructure.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "layer": {
+                        "type": "string",
+                        "enum": ["lights", "primary", "secondary", "vehicles", "ev", "substations"],
+                        "description": "Layer to toggle: 'lights' (traffic lights), 'primary' (primary power cables), 'secondary' (secondary cables), 'vehicles' (cars/EVs), 'ev' (EV charging stations), 'substations' (power substations)"
+                    },
+                    "visible": {
+                        "type": "boolean",
+                        "description": "True to show the layer, false to hide it"
+                    }
+                },
+                "required": ["layer", "visible"]
+            }
+        }
+    },
+
+    # -------------------------------------------------------------------------
+    # EV STATION CONTROL
+    # -------------------------------------------------------------------------
+    {
+        "type": "function",
+        "function": {
+            "name": "fail_ev_station",
+            "description": "Take an individual EV charging station offline. Vehicles currently charging will be released. Requires SUMO to be running.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "station_id": {
+                        "type": "string",
+                        "description": "ID of the EV station to fail (e.g. 'ev_station_1')"
+                    }
+                },
+                "required": ["station_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "restore_ev_station",
+            "description": "Bring a failed EV charging station back online. Its parent substation must be operational.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "station_id": {
+                        "type": "string",
+                        "description": "ID of the EV station to restore (e.g. 'ev_station_1')"
+                    }
+                },
+                "required": ["station_id"]
+            }
+        }
+    },
+
+    # -------------------------------------------------------------------------
+    # BLACKOUT SCENARIO
+    # -------------------------------------------------------------------------
+    {
+        "type": "function",
+        "function": {
+            "name": "trigger_blackout",
+            "description": "Trigger a city-wide blackout by failing ALL substations except one spare. This is a dramatic scenario for testing grid resilience and V2G emergency response.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "spare_substation": {
+                        "type": "string",
+                        "description": "Name of the one substation to keep online (default: 'Midtown East')",
+                        "default": "Midtown East"
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+
+    # -------------------------------------------------------------------------
+    # MAP VIEW (2D / 3D)
+    # -------------------------------------------------------------------------
+    {
+        "type": "function",
+        "function": {
+            "name": "set_map_view",
+            "description": "Switch the map between 2D (flat, top-down) and 3D (tilted, perspective) views or set a custom camera angle.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "enum": ["2d", "3d"],
+                        "description": "'2d' for flat top-down view, '3d' for tilted perspective view"
+                    },
+                    "pitch": {
+                        "type": "number",
+                        "description": "Optional custom camera pitch in degrees (0=flat, 60=tilted). Overrides mode if provided."
+                    },
+                    "bearing": {
+                        "type": "number",
+                        "description": "Optional camera rotation in degrees (0=north, 90=east). Overrides mode if provided."
+                    }
+                },
+                "required": ["mode"]
+            }
+        }
+    },
 ]
 
 
@@ -457,6 +573,13 @@ class ToolExecutor:
             "get_load_forecast": self._get_load_forecast,
             # Map Control
             "focus_map": self._focus_map,
+            "toggle_map_layer": self._toggle_map_layer,
+            "set_map_view": self._set_map_view,
+            # EV Station Control
+            "fail_ev_station": self._fail_ev_station,
+            "restore_ev_station": self._restore_ev_station,
+            # Blackout
+            "trigger_blackout": self._trigger_blackout,
             # Test Scenarios
             "run_ev_rush_test": self._run_ev_rush_test,
             "run_v2g_test": self._run_v2g_test,
@@ -658,18 +781,25 @@ class ToolExecutor:
             vehicle_count = max(1, min(500, vehicle_count))
             ev_pct = max(0, min(100, ev_percentage)) / 100.0
 
-            success = self.sumo_manager.start(
-                vehicle_count=vehicle_count,
-                ev_percentage=ev_pct
-            )
+            # Start SUMO process (the method is start_sumo, not start)
+            success = self.sumo_manager.start_sumo(gui=False, seed=42)
 
             if success:
                 self.system_state['sumo_running'] = True
+
+                # Spawn vehicles (start_sumo only launches the process,
+                # vehicles must be spawned separately)
+                spawned = self.sumo_manager.spawn_vehicles(
+                    count=vehicle_count,
+                    ev_percentage=ev_pct
+                )
+
                 return {
                     "success": True,
                     "vehicle_count": vehicle_count,
+                    "vehicles_spawned": spawned,
                     "ev_percentage": ev_percentage,
-                    "message": f"Simulation started with {vehicle_count} vehicles ({ev_percentage}% electric)"
+                    "message": f"Simulation started with {spawned} vehicles ({ev_percentage}% electric)"
                 }
             else:
                 return {"success": False, "error": "SUMO failed to start"}
@@ -695,18 +825,30 @@ class ToolExecutor:
 
         count = max(1, min(500, count))
 
+        # Get current EV config for spawn parameters
+        ev_pct = self.current_ev_config.get('ev_percentage', 70) / 100.0
+        batt_min = self.current_ev_config.get('battery_min_soc', 20) / 100.0
+        batt_max = self.current_ev_config.get('battery_max_soc', 90) / 100.0
+
         # Use the spawn queue (async, non-blocking)
+        # Each item must have ev_percentage, battery_min_soc, battery_max_soc
+        # matching the format simulation_loop expects
         if self.vehicle_spawn_queue is not None:
-            self.vehicle_spawn_queue.append({
-                'count': count,
-                'timestamp': datetime.now().isoformat()
-            })
+            for _ in range(count):
+                self.vehicle_spawn_queue.append({
+                    'ev_percentage': ev_pct,
+                    'battery_min_soc': batt_min,
+                    'battery_max_soc': batt_max,
+                })
             return {"success": True, "count": count, "message": f"Queued {count} vehicles for spawning"}
         else:
             # Direct spawn
             try:
-                self.sumo_manager.spawn_vehicles(count)
-                return {"success": True, "count": count, "message": f"Spawned {count} vehicles"}
+                spawned = self.sumo_manager.spawn_vehicles(
+                    count, ev_percentage=ev_pct,
+                    battery_min_soc=batt_min, battery_max_soc=batt_max
+                )
+                return {"success": True, "count": count, "spawned": spawned, "message": f"Spawned {spawned} vehicles"}
             except Exception as e:
                 return {"success": False, "error": str(e)}
 
@@ -762,12 +904,38 @@ class ToolExecutor:
             return {"success": False, "error": str(e)}
 
     def _run_scenario(self, scenario: str) -> dict:
-        """Run a predefined test scenario"""
+        """Run a predefined test scenario — also starts SUMO if not running"""
         if not self.scenario_controller:
             return {"success": False, "error": "Scenario controller not available"}
 
         try:
             result = self.scenario_controller.run_scenario(scenario)
+
+            # Auto-start SUMO simulation if not already running
+            # so that vehicles actually appear on the map
+            if not self.system_state.get('sumo_running'):
+                # Vehicle counts matching ScenarioController.run_scenario()
+                scenario_vehicles = {
+                    'rush_hour_stress_test': (100, 70),
+                    'evening_peak_v2g': (80, 70),
+                    'winter_emergency': (60, 70),
+                    'summer_heatwave': (90, 70),
+                    'heatwave_crisis': (90, 70),
+                    'catastrophic_heat': (100, 70),
+                    'late_night_low_load': (20, 70),
+                }
+                vehicle_count, ev_pct = scenario_vehicles.get(scenario, (50, 70))
+                sim_result = self._start_simulation(
+                    vehicle_count=vehicle_count,
+                    ev_percentage=ev_pct
+                )
+                result['simulation_started'] = sim_result.get('success', False)
+                if sim_result.get('success'):
+                    result['events'] = result.get('events', [])
+                    result['events'].append(
+                        f"SUMO simulation started with {vehicle_count} vehicles ({ev_pct}% EV)"
+                    )
+
             return {"success": True, "scenario": scenario, **result}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -963,6 +1131,28 @@ class ToolExecutor:
         }
 
     # =========================================================================
+    # MAP VIEW (2D / 3D)
+    # =========================================================================
+
+    def _set_map_view(self, mode: str = "3d", pitch: float = None, bearing: float = None) -> dict:
+        """Switch between 2D and 3D map views"""
+        presets = {
+            '2d': {'pitch': 0, 'bearing': 0},
+            '3d': {'pitch': 60, 'bearing': -17.6},
+        }
+        preset = presets.get(mode, presets['3d'])
+        final_pitch = pitch if pitch is not None else preset['pitch']
+        final_bearing = bearing if bearing is not None else preset['bearing']
+
+        return {
+            "success": True,
+            "mode": mode,
+            "pitch": final_pitch,
+            "bearing": final_bearing,
+            "message": f"Map switched to {mode.upper()} view (pitch={final_pitch}°, bearing={final_bearing}°)"
+        }
+
+    # =========================================================================
     # TEST SCENARIOS
     # =========================================================================
 
@@ -973,7 +1163,12 @@ class ToolExecutor:
         try:
             count = 30
             if self.vehicle_spawn_queue is not None:
-                self.vehicle_spawn_queue.append({'count': count, 'force_low_battery': True})
+                for _ in range(count):
+                    self.vehicle_spawn_queue.append({
+                        'ev_percentage': 1.0,         # 100% EVs for rush test
+                        'battery_min_soc': 0.05,      # Very low battery
+                        'battery_max_soc': 0.25,      # Still low
+                    })
             return {"success": True, "message": f"EV rush test started — spawning {count} low-battery EVs"}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -1004,4 +1199,148 @@ class ToolExecutor:
             "failure_result": fail_result,
             "v2g_result": v2g_result,
             "message": f"V2G test started: {target} failed and V2G enabled. Monitor V2G status for restoration progress."
+        }
+
+    # =========================================================================
+    # MAP LAYER CONTROL
+    # =========================================================================
+
+    def _toggle_map_layer(self, layer: str, visible: bool) -> dict:
+        """Toggle a map visualization layer on/off"""
+        valid_layers = ['lights', 'primary', 'secondary', 'vehicles', 'ev', 'substations']
+        if layer not in valid_layers:
+            return {"success": False, "error": f"Unknown layer '{layer}'. Valid: {valid_layers}"}
+
+        layer_labels = {
+            'lights': 'Traffic Lights',
+            'primary': 'Primary Power Cables',
+            'secondary': 'Secondary Power Cables',
+            'vehicles': 'Vehicles',
+            'ev': 'EV Charging Stations',
+            'substations': 'Power Substations'
+        }
+
+        return {
+            "success": True,
+            "layer": layer,
+            "visible": visible,
+            "label": layer_labels[layer],
+            "message": f"{'Showing' if visible else 'Hiding'} {layer_labels[layer]} on map"
+        }
+
+    # =========================================================================
+    # EV STATION CONTROL
+    # =========================================================================
+
+    def _fail_ev_station(self, station_id: str) -> dict:
+        """Fail an individual EV charging station"""
+        if station_id not in self.integrated_system.ev_stations:
+            available = list(self.integrated_system.ev_stations.keys())
+            return {"success": False, "error": f"Station '{station_id}' not found. Available: {available}"}
+
+        ev_station = self.integrated_system.ev_stations[station_id]
+        if not ev_station.get('operational', True):
+            return {"success": False, "error": f"{station_id} is already offline"}
+
+        # Handle station failure in station manager
+        released_vehicles = []
+        if (hasattr(self.sumo_manager, 'station_manager') and
+                self.sumo_manager.station_manager):
+            released_vehicles = self.sumo_manager.station_manager.handle_station_failure(station_id)
+            # Clear assignment on released vehicles
+            if released_vehicles and hasattr(self.sumo_manager, 'vehicles'):
+                for veh_id in released_vehicles:
+                    if veh_id in self.sumo_manager.vehicles:
+                        v = self.sumo_manager.vehicles[veh_id]
+                        if hasattr(v, 'is_charging'):
+                            v.is_charging = False
+                        if hasattr(v, 'assigned_ev_station'):
+                            v.assigned_ev_station = None
+
+        # Update integrated system
+        ev_station['operational'] = False
+
+        # Update SUMO station status
+        if station_id in getattr(self.sumo_manager, 'ev_stations_sumo', {}):
+            self.sumo_manager.ev_stations_sumo[station_id]['available'] = 0
+
+        return {
+            "success": True,
+            "station_id": station_id,
+            "station_name": ev_station.get('name', station_id),
+            "released_vehicles": len(released_vehicles),
+            "message": f"{ev_station.get('name', station_id)} taken offline — {len(released_vehicles)} vehicles released"
+        }
+
+    def _restore_ev_station(self, station_id: str) -> dict:
+        """Restore a failed EV station"""
+        if station_id not in self.integrated_system.ev_stations:
+            available = list(self.integrated_system.ev_stations.keys())
+            return {"success": False, "error": f"Station '{station_id}' not found. Available: {available}"}
+
+        ev_station = self.integrated_system.ev_stations[station_id]
+        if ev_station.get('operational', True):
+            return {"success": False, "error": f"{station_id} is already operational"}
+
+        # Check parent substation
+        parent_sub = ev_station.get('substation')
+        if parent_sub and parent_sub in self.integrated_system.substations:
+            if not self.integrated_system.substations[parent_sub].get('operational', True):
+                return {
+                    "success": False,
+                    "error": f"Cannot restore — parent substation '{parent_sub}' is offline. Restore it first."
+                }
+
+        ev_station['operational'] = True
+
+        # Restore SUMO station capacity
+        if station_id in getattr(self.sumo_manager, 'ev_stations_sumo', {}):
+            self.sumo_manager.ev_stations_sumo[station_id]['available'] = ev_station.get('chargers', 4)
+
+        if (hasattr(self.sumo_manager, 'station_manager') and
+                self.sumo_manager.station_manager and
+                station_id in self.sumo_manager.station_manager.stations):
+            self.sumo_manager.station_manager.stations[station_id]['operational'] = True
+
+        return {
+            "success": True,
+            "station_id": station_id,
+            "station_name": ev_station.get('name', station_id),
+            "message": f"{ev_station.get('name', station_id)} restored to service"
+        }
+
+    # =========================================================================
+    # BLACKOUT SCENARIO
+    # =========================================================================
+
+    def _trigger_blackout(self, spare_substation: str = "Midtown East") -> dict:
+        """Trigger city-wide blackout — fail all substations except one spare"""
+        failed = []
+        skipped = []
+        spare_found = False
+
+        for name in list(self.integrated_system.substations.keys()):
+            if name == spare_substation:
+                spare_found = True
+                skipped.append(name)
+                continue
+            sub_data = self.integrated_system.substations[name]
+            if not sub_data.get('operational', True):
+                skipped.append(name)
+                continue
+            result = self._fail_substation(name)
+            if result.get('success'):
+                failed.append(name)
+
+        if not spare_found:
+            # If the specified spare doesn't exist, warn but proceed
+            pass
+
+        return {
+            "success": True,
+            "failed_substations": failed,
+            "spare_substation": spare_substation,
+            "count_failed": len(failed),
+            "already_offline": [s for s in skipped if s != spare_substation],
+            "message": f"⚠️ BLACKOUT: {len(failed)} substations taken offline. Only {spare_substation} remains operational."
         }
