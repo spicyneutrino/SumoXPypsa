@@ -16,6 +16,124 @@ class ScenarioControllerUI {
         this.createControlPanel();
         this.attachEventListeners();
         this.startStatusUpdates();
+        this.initAutoScheduler(); // NEW: Auto-switch scenario
+    }
+
+    initAutoScheduler() {
+        // Delay before auto-switch (90 seconds)
+        const AUTO_SWITCH_DELAY_MS = 90000; 
+        // const AUTO_SWITCH_DELAY_MS = 10000; // Debug: 10s
+
+        // Determine target scenario based on current time
+        const hour = new Date().getHours();
+        let targetScenario = 'normal_day';
+        let scenarioName = 'Normal Day';
+
+        if (hour >= 6 && hour < 10) {
+            targetScenario = 'morning_rush';
+            scenarioName = 'Morning Rush';
+        } else if (hour >= 16 && hour < 20) {
+            targetScenario = 'evening_rush';
+            scenarioName = 'Evening Rush';
+        } else if (hour >= 20 || hour < 6) {
+            targetScenario = 'late_night';
+            scenarioName = 'Late Night';
+        }
+
+        // Show simplified notification with countdown
+        this.autoSwitchTimer = setTimeout(() => {
+            this.runScenario(targetScenario);
+            this.removeAutoSwitchUI();
+        }, AUTO_SWITCH_DELAY_MS);
+
+        this.showAutoSwitchUI(scenarioName, AUTO_SWITCH_DELAY_MS);
+    }
+
+    showAutoSwitchUI(scenarioName, durationMs) {
+        const div = document.createElement('div');
+        div.id = 'auto-switch-banner';
+        div.style.cssText = `
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(20, 30, 50, 0.95);
+            border: 1px solid #64b5f6;
+            color: white;
+            padding: 12px 24px;
+            border-radius: 30px;
+            z-index: 10001;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+            font-family: 'Inter', sans-serif;
+        `;
+
+        // Calculate remaining seconds
+        let remainingSeconds = Math.ceil(durationMs / 1000);
+
+        div.innerHTML = `
+            <div>
+                <span style="color: #aaa; font-size: 12px;">AUTO-SCENARIO</span><br>
+                Switching to <strong style="color: #64b5f6;">${scenarioName}</strong> in <span id="auto-switch-timer" style="font-family: monospace; font-weight: bold;">${remainingSeconds}s</span>...
+            </div>
+            <button id="cancel-auto-switch" style="
+                background: rgba(255, 255, 255, 0.1);
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                color: white;
+                padding: 6px 12px;
+                border-radius: 15px;
+                cursor: pointer;
+                font-size: 12px;
+                transition: all 0.2s;
+            ">CANCEL</button>
+        `;
+
+        document.body.appendChild(div);
+
+        // Timer update loop
+        this.countdownInterval = setInterval(() => {
+            remainingSeconds--;
+            const timerEl = document.getElementById('auto-switch-timer');
+            if (timerEl) timerEl.textContent = `${remainingSeconds}s`;
+            
+            if (remainingSeconds <= 0) {
+                clearInterval(this.countdownInterval);
+            }
+        }, 1000);
+
+        // Attach cancel listener
+        document.getElementById('cancel-auto-switch').addEventListener('click', () => {
+            this.cancelAutoSwitch();
+        });
+
+        // Add hover effect via JS since inline styles are tricky for pseudo-classes
+        const btn = document.getElementById('cancel-auto-switch');
+        btn.onmouseover = () => btn.style.background = 'rgba(255, 60, 60, 0.3)';
+        btn.onmouseout = () => btn.style.background = 'rgba(255, 255, 255, 0.1)';
+    }
+
+    cancelAutoSwitch() {
+        if (this.autoSwitchTimer) {
+            clearTimeout(this.autoSwitchTimer);
+            this.autoSwitchTimer = null;
+        }
+        if (this.countdownInterval) {
+            clearInterval(this.countdownInterval);
+            this.countdownInterval = null;
+        }
+        this.removeAutoSwitchUI();
+        console.log('🚫 Auto-scenario switch cancelled by user');
+        
+        // Show confirmation toast
+        this.showProgressNotification('Auto-switch cancelled', 'info');
+    }
+
+    removeAutoSwitchUI() {
+        const banner = document.getElementById('auto-switch-banner');
+        if (banner) banner.remove();
+        if (this.countdownInterval) clearInterval(this.countdownInterval);
     }
 
     createControlPanel() {
@@ -100,7 +218,7 @@ class ScenarioControllerUI {
                 position: fixed;
                 top: 80px;
                 right: 20px;
-                width: 320px;
+                width: 300px;
                 background: rgba(20, 20, 40, 0.95);
                 backdrop-filter: blur(20px);
                 border: 1px solid rgba(100, 200, 255, 0.3);
@@ -396,26 +514,42 @@ class ScenarioControllerUI {
     updateTimeDisplay(hour) {
         const timeDisplay = document.getElementById('time-display');
         const timeDesc = document.getElementById('time-description');
+        // const footerTime = document.getElementById('time'); // REMOVED: Now handled by updateLocalTime
+
+        const timeStr = `${String(Math.floor(hour)).padStart(2, '0')}:${String(Math.round((hour % 1) * 60)).padStart(2, '0')}`;
 
         if (timeDisplay) {
-            timeDisplay.textContent = `${String(hour).padStart(2, '0')}:00`;
+            timeDisplay.textContent = timeStr;
         }
 
         if (timeDesc) {
             timeDesc.textContent = this.getTimeDescription(hour);
+        }
+
+        // FORCE SYNC local clock in script.js to prevent flicker
+        if (window.updateLocalTime) {
+            const h = Math.floor(hour);
+            const m = Math.floor((hour * 60) % 60);
+            const s = Math.round((hour * 3600) % 60);
+            window.updateLocalTime(h, m, s);
         }
     }
 
     updateTempDisplay(temp) {
         const tempDisplay = document.getElementById('temp-display');
         const weatherDisplay = document.getElementById('weather-display');
+        const footerTemp = document.getElementById('temperature');
 
         if (tempDisplay) {
-            tempDisplay.textContent = `${temp}°F`;
+            tempDisplay.textContent = `${Math.round(temp)}°F`;
         }
 
         if (weatherDisplay) {
             weatherDisplay.textContent = this.getWeatherDescription(temp);
+        }
+
+        if (footerTemp) {
+            footerTemp.textContent = `${Math.round(temp)}°F`;
         }
     }
 
@@ -442,8 +576,13 @@ class ScenarioControllerUI {
         return "Clear";
     }
 
-    async setTime(hour, autoSpawnVehicles = true) {
+    async setTime(hour, autoSpawnVehicles = true, isAuto = false) {
+        if (!isAuto) {
+            this.cancelAutoSwitch(); // Cancel auto-switch if user manually sets time
+        }
         try {
+            // Set global debounce to suppress auto-advance overwrite
+            window._lastManualTimeUpdate = Date.now();
             const response = await fetch('/api/scenario/set_time', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -475,8 +614,10 @@ class ScenarioControllerUI {
                     window.llmScenarioHandler.updateMapOverlay();
                 }
 
-                // Update status bar time display
-                if (window.updateTime) {
+                // Update status bar time display (sync local clock + debounce)
+                if (window.syncDisplayTime) {
+                    window.syncDisplayTime(hour);
+                } else if (window.updateTime) {
                     window.updateTime();
                 }
             }
@@ -485,7 +626,10 @@ class ScenarioControllerUI {
         }
     }
 
-    async setTemperature(temp) {
+    async setTemperature(temp, isAuto = false) {
+        if (!isAuto) {
+            this.cancelAutoSwitch(); // Cancel auto-switch if user manually sets temp
+        }
         try {
             const response = await fetch('/api/scenario/set_temperature', {
                 method: 'POST',
@@ -534,6 +678,7 @@ class ScenarioControllerUI {
 
     async runScenario(scenarioName) {
         console.log(`🚀 Running scenario: ${scenarioName}`);
+        this.cancelAutoSwitch(); // Cancel auto-switch if user manually runs a scenario
         try {
             let scenarioConfig = {};
 
@@ -726,7 +871,7 @@ class ScenarioControllerUI {
         notification.style.cssText = `
             position: fixed;
             top: 80px;
-            right: 360px;
+            right: 340px;
             background: linear-gradient(135deg, ${bgColor}, ${this.lightenColor(bgColor)});
             color: white;
             padding: 12px 20px;
@@ -756,7 +901,7 @@ class ScenarioControllerUI {
         notification.style.cssText = `
             position: fixed;
             top: 20px;
-            right: 360px;
+            right: 340px;
             background: linear-gradient(135deg, #2196f3, #42a5f5);
             color: white;
             padding: 16px 20px;
@@ -956,7 +1101,8 @@ class ScenarioControllerUI {
     startStatusUpdates() {
         console.log("Starting WebSocket status updates...");
         // Initialize Socket.IO
-        this.socket = io();
+        // Use global socket if available to share connection
+        this.socket = window.socket || io();
         
         this.socket.on('connect', () => {
             console.log('✓ Connected to Scenario WebSocket');
@@ -974,6 +1120,8 @@ class ScenarioControllerUI {
             if (data.hour !== undefined) {
                 const time = data.hour + (data.minute || 0) / 60;
                 this.currentTime = time;
+                this._lastChatbotTimeUpdate = Date.now(); // debounce auto-advance
+                window._lastManualTimeUpdate = Date.now(); // global debounce
                 const timeSlider = document.getElementById('time-slider');
                 if (timeSlider) timeSlider.value = time;
                 this.updateTimeDisplay(time);
@@ -1102,17 +1250,20 @@ class ScenarioControllerUI {
 
         // 1. Update Scenario UI (Time, Weather, Substations)
         if (data.scenario) {
-            // Update time if auto-advancing
+            // Update time if auto-advancing (skip if chatbot just set time)
             if (data.scenario.auto_advance) {
-                // Update internal time
-                this.currentTime = data.scenario.time_hour + (data.scenario.time_minute/60);
-                
-                // Update UI elements without triggering events
-                const timeSlider = document.getElementById('time-slider');
-                if (timeSlider && Math.abs(timeSlider.value - this.currentTime) > 0.1) {
-                    timeSlider.value = this.currentTime; // This might be jumpy, maybe don't update slider constantly?
+                const timeSinceManualUpdate = Date.now() - (window._lastManualTimeUpdate || this._lastChatbotTimeUpdate || 0);
+                if (timeSinceManualUpdate > 5000) {
+                    // Only auto-advance if chatbot hasn't set time recently
+                    const totalHours = data.scenario.time_hour + (data.scenario.time_minute/60) + (data.scenario.time_second/3600);
+                    this.currentTime = totalHours;
+                    
+                    const timeSlider = document.getElementById('time-slider');
+                    if (timeSlider && Math.abs(timeSlider.value - this.currentTime) > 0.1) {
+                        timeSlider.value = this.currentTime;
+                    }
+                    this.updateTimeDisplay(this.currentTime);
                 }
-                this.updateTimeDisplay(this.currentTime);
             }
             
             // Update Substation Status Panel
@@ -1122,6 +1273,27 @@ class ScenarioControllerUI {
         // 2. Update Map and Network Visualization
         if (window.updateNetworkFromData) {
             window.updateNetworkFromData(data);
+        }
+
+        // 3. Update Sync Monitor widget
+        const syncEl = document.getElementById('syncStatus');
+        const syncDot = document.querySelector('#syncMonitor .sync-dot');
+        if (syncEl) {
+            const vehicles = data.vehicle_stats || {};
+            const totalLoad = data.scenario?.total_load_mw;
+            const sumoStep = data.simulation_step || data.step;
+            if (sumoStep !== undefined && totalLoad !== undefined) {
+                syncEl.textContent = `Step ${sumoStep} · ${totalLoad.toFixed(1)} MW`;
+                if (syncDot) {
+                    syncDot.style.background = '#00ff88';
+                    syncDot.style.boxShadow = '0 0 12px rgba(0, 255, 136, 0.8)';
+                    // Flash on sync
+                    syncDot.style.transform = 'scale(1.3)';
+                    setTimeout(() => { syncDot.style.transform = 'scale(1)'; }, 200);
+                }
+            } else if (data.scenario) {
+                syncEl.textContent = `${totalLoad ? totalLoad.toFixed(1) + ' MW' : 'Active'}`;
+            }
         }
     }
 
@@ -1144,5 +1316,11 @@ document.addEventListener('DOMContentLoaded', () => {
     window.scenarioUI = new ScenarioControllerUI();
     // Also expose as scenarioControls for LLM handler compatibility
     window.scenarioControls = window.scenarioUI;
+    
+    // NEW: Sync backend with system time on startup
+    const now = new Date();
+    const currentHour = now.getHours() + (now.getMinutes() / 60);
+    window.scenarioUI.setTime(currentHour, false, true); // autoSpawn=false to wait for scenario, isAuto=true to prevent cancel
+    
     console.log('✓ Scenario Controller UI initialized');
 });

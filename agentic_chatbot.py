@@ -191,6 +191,9 @@ RULES:
 6. Be concise but thorough — include numbers and specifics
 7. When the user asks about the system, use tools to get fresh data rather than guessing
 8. When showing infrastructure, use toggle_map_layer to highlight relevant layers
+9. For DESTRUCTIVE actions (trigger_blackout, fail_substation), WARN the user first by describing what will happen and what substations will be affected, then proceed
+10. For complex requests like "prepare for a heatwave" or "test resilience", use the macro tools (prepare_for_event, run_resilience_test, analyze_grid_vulnerability) — they chain multiple actions automatically
+11. When the user's request is ambiguous (e.g. "fail the station" without specifying which), list the available options and ask for clarification before acting
 """
 
     # =========================================================================
@@ -266,6 +269,15 @@ RULES:
                         tool_args = {}
 
                     print(f"[AGENTIC] Iteration {iteration + 1}: Calling {tool_name}({tool_args})")
+
+                    # Emit real-time progress to frontend (Feature 3: Streaming Progress)
+                    if self.socketio:
+                        self.socketio.emit('chatbot_tool_progress', {
+                            'tool': tool_name,
+                            'args': tool_args,
+                            'iteration': iteration + 1,
+                            'status': 'calling'
+                        }, namespace='/')
 
                     # Execute the tool
                     result = self.tool_executor.execute(tool_name, tool_args)
@@ -367,52 +379,52 @@ RULES:
                 self.socketio.emit('scenario_time_update', {
                     'hour': result.get('hour', tool_args.get('hour')),
                     'minute': result.get('minute', 0)
-                })
+                }, namespace='/')
 
             elif tool_name == "set_temperature" and result.get("success"):
                 self.socketio.emit('scenario_temp_update', {
                     'temperature': result.get('temperature', tool_args.get('temperature'))
-                })
+                }, namespace='/')
 
             elif tool_name == "set_simulation_speed" and result.get("success"):
                 self.socketio.emit('simulation_speed_update', {
                     'speed': result.get('speed', tool_args.get('speed'))
-                })
+                }, namespace='/')
 
             elif tool_name in ("fail_substation", "restore_substation") and result.get("success"):
                 self.socketio.emit('substation_update', {
                     'substation': result.get('substation'),
                     'action': result.get('action'),
                     'operational': tool_name == "restore_substation"
-                })
+                }, namespace='/')
 
             elif tool_name == "restore_all_substations" and result.get("success"):
                 self.socketio.emit('substation_update', {
                     'action': 'restore_all',
                     'restored': result.get('restored', [])
-                })
+                }, namespace='/')
 
             elif tool_name in ("enable_v2g", "disable_v2g") and result.get("success"):
                 self.socketio.emit('v2g_update', {
                     'substation': result.get('substation'),
                     'action': result.get('action'),
-                })
+                }, namespace='/')
 
             elif tool_name in ("start_simulation", "stop_simulation") and result.get("success"):
                 self.socketio.emit('simulation_state_update', {
                     'running': tool_name == "start_simulation",
-                })
+                }, namespace='/')
 
             elif tool_name == "focus_map" and result.get("success"):
                 map_action = result.get('map_action', {})
-                self.socketio.emit('ai_map_focus', map_action)
+                self.socketio.emit('ai_map_focus', map_action, namespace='/')
 
             elif tool_name == "run_scenario" and result.get("success"):
                 self.socketio.emit('scenario_change', {
                     'scenario': tool_args.get('scenario'),
                     'result': {k: v for k, v in result.items()
                                if k in ('success', 'scenario', 'message')}
-                })
+                }, namespace='/')
 
             elif tool_name == "configure_ev" and result.get("success"):
                 # Push updated EV config to frontend so sliders update
@@ -420,33 +432,33 @@ RULES:
                     'ev_percentage': tool_args.get('ev_percentage', 70),
                     'battery_min_soc': tool_args.get('battery_min_soc', 20),
                     'battery_max_soc': tool_args.get('battery_max_soc', 90),
-                })
+                }, namespace='/')
 
             elif tool_name == "spawn_vehicles" and result.get("success"):
                 self.socketio.emit('vehicles_spawned', {
                     'count': tool_args.get('count', 0),
                     'message': result.get('message', '')
-                })
+                }, namespace='/')
 
             elif tool_name == "toggle_map_layer" and result.get("success"):
                 self.socketio.emit('layer_toggle', {
                     'layer': tool_args.get('layer'),
                     'visible': tool_args.get('visible'),
-                })
+                }, namespace='/')
 
             elif tool_name == "set_map_view" and result.get("success"):
                 self.socketio.emit('map_view_change', {
                     'mode': result.get('mode'),
                     'pitch': result.get('pitch'),
                     'bearing': result.get('bearing'),
-                })
+                }, namespace='/')
 
             elif tool_name in ("fail_ev_station", "restore_ev_station") and result.get("success"):
                 # Refresh network state so the frontend picks up the change
                 self.socketio.emit('ev_station_update', {
                     'station_id': result.get('station_id'),
                     'action': 'failed' if tool_name == 'fail_ev_station' else 'restored',
-                })
+                }, namespace='/')
 
             elif tool_name == "trigger_blackout" and result.get("success"):
                 # Bulk substation failure — refresh the entire network
@@ -454,7 +466,26 @@ RULES:
                     'action': 'blackout',
                     'failed': result.get('failed_substations', []),
                     'spare': result.get('spare_substation'),
-                })
+                }, namespace='/')
+
+            # --- Macro tools ---
+            elif tool_name == "prepare_for_event" and result.get("success"):
+                # Push time and temp updates since this tool changes both
+                self.socketio.emit('scenario_time_update', {
+                    'hour': result.get('hour', 12),
+                    'minute': result.get('minute', 0)
+                }, namespace='/')
+                self.socketio.emit('scenario_temp_update', {
+                    'temperature': result.get('temperature', 72)
+                }, namespace='/')
+
+            elif tool_name == "run_resilience_test" and result.get("success"):
+                # Notify frontend of test completion
+                self.socketio.emit('resilience_test_complete', {
+                    'substation': result.get('substation'),
+                    'grade': result.get('resilience_grade'),
+                    'recovery_pct': result.get('recovery_percentage'),
+                }, namespace='/')
 
         except Exception as e:
             print(f"[AGENTIC] Socket.IO emit error: {e}")

@@ -466,6 +466,11 @@
         <div class="status-item">
             🌡️ <span id="temperature">72</span>°F
         </div>
+        <div class="status-item sync-monitor" id="syncMonitor" title="SUMO ↔ PyPSA Synchronization">
+            <div class="sync-dot"></div>
+            <span class="sync-label">SYNC</span>
+            <span class="sync-value" id="syncStatus">Idle</span>
+        </div>
     </div>
     
     <!-- Blackout Alert -->
@@ -478,8 +483,11 @@
     </div>
     
     <!-- Premium Legend -->
-    <div class="legend">
-        <div class="legend-title">System Components</div>
+    <div class="legend collapsed" id="system-legend">
+        <div class="legend-header" onclick="toggleLegend()">
+            <div class="legend-title">System Components</div>
+            <button class="legend-toggle" id="legend-toggle-btn">▶</button>
+        </div>
         <div class="legend-grid">
             <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px;">Infrastructure</div>
             <div class="legend-row">
@@ -502,28 +510,28 @@
             </div>
             <div style="font-size: 11px; color: var(--text-muted); margin-top: 12px; text-transform: uppercase; letter-spacing: 1px;">Vehicles</div>
             <div class="legend-row">
-                <span class="legend-car" style="color:#00ff00;">
+                <span class="legend-car" style="color:#00FFD4;">
                     <svg viewBox="0 0 22 14"><rect x="1" y="2" rx="2" ry="2" width="20" height="10"/></svg>
                 </span>
                 <span>EV High 40%+</span>
                 <span id="legend-ev-high" class="badge">0</span>
             </div>
             <div class="legend-row">
-                <span class="legend-car" style="color:#ffaa00;">
+                <span class="legend-car" style="color:#4488FF;">
                     <svg viewBox="0 0 22 14"><rect x="1" y="2" rx="2" ry="2" width="20" height="10"/></svg>
                 </span>
                 <span>EV Medium 20-40%</span>
                 <span id="legend-ev-medium" class="badge">0</span>
             </div>
             <div class="legend-row">
-                <span class="legend-car" style="color:#ff0000;">
+                <span class="legend-car" style="color:#FF44AA;">
                     <svg viewBox="0 0 22 14"><rect x="1" y="2" rx="2" ry="2" width="20" height="10"/></svg>
                 </span>
                 <span>EV Low 2-20%</span>
                 <span id="legend-ev-low" class="badge">0</span>
             </div>
             <div class="legend-row">
-                <span class="legend-car" style="color:#6464ff;">
+                <span class="legend-car" style="color:#8899AA;">
                     <svg viewBox="0 0 22 14"><rect x="1" y="2" rx="2" ry="2" width="20" height="10"/></svg>
                 </span>
                 <span>Gas Vehicle</span>

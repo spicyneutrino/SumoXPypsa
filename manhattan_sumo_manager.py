@@ -515,17 +515,22 @@ class ManhattanSUMOManager:
             if traci.edge.getLaneNumber(edge_id) == 0:
                 continue
             
-            # CRITICAL: Check if edge allows passenger vehicles
+            # CRITICAL CHECK: Verify the first lane allows passenger vehicles
+            # SUMO departure checks permissions of the departLane (usually 0 or "best")
+            # Checking the edge's general permissions isn't strict enough
             try:
-                # Get allowed vehicle classes for the edge
-                allowed = traci.edge.getAllowed(edge_id)
-                # If empty, all vehicle types are allowed
-                # If not empty, check if 'passenger' is in the list
+                # Construct ID of first lane
+                lane_id = f"{edge_id}_0"
+                
+                # Check allows on the LANE level
+                allowed = traci.lane.getAllowed(lane_id)
+                
+                # If empty, all are allowed. If not empty, 'passenger' must be present.
                 if not allowed or 'passenger' in allowed:
                     valid_edges.append(edge_id)
             except:
-                # If we can't determine, assume it's valid
-                valid_edges.append(edge_id)
+                # If lane check fails (e.g. lane doesn't exist), skip this edge
+                continue
         
         if not valid_edges:
             print("ERROR: No valid edges found in SUMO network")

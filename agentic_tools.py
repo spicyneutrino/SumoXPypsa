@@ -520,6 +520,57 @@ TOOL_DEFINITIONS = [
             }
         }
     },
+
+    # -------------------------------------------------------------------------
+    # MACRO / MULTI-STEP TOOLS
+    # -------------------------------------------------------------------------
+    {
+        "type": "function",
+        "function": {
+            "name": "run_resilience_test",
+            "description": "Run a comprehensive grid resilience test: fail a substation, enable V2G recovery, monitor recovery metrics, and restore. Returns a full resilience report. This is a multi-step operation that chains several actions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "substation": {
+                        "type": "string",
+                        "description": "The substation to test resilience on (e.g. 'Times Square')"
+                    }
+                },
+                "required": ["substation"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_grid_vulnerability",
+            "description": "Analyze the entire grid to identify the most vulnerable substations. Checks load ratios, identifies potential cascade failures, and recommends V2G pre-positioning for resilience. Returns a ranked vulnerability report.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "prepare_for_event",
+            "description": "Prepare the grid and simulation for a specific event type (heatwave, morning_rush, evening_peak, storm, normal). Automatically sets time, temperature, spawns appropriate vehicles, and adjusts EV config. This demonstrates intelligent orchestration.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "event": {
+                        "type": "string",
+                        "enum": ["heatwave", "morning_rush", "evening_peak", "storm", "normal"],
+                        "description": "The event type to prepare for"
+                    }
+                },
+                "required": ["event"]
+            }
+        }
+    },
 ]
 
 
@@ -583,6 +634,10 @@ class ToolExecutor:
             # Test Scenarios
             "run_ev_rush_test": self._run_ev_rush_test,
             "run_v2g_test": self._run_v2g_test,
+            # Macro / Multi-Step Tools
+            "run_resilience_test": self._run_resilience_test,
+            "analyze_grid_vulnerability": self._analyze_grid_vulnerability,
+            "prepare_for_event": self._prepare_for_event,
         }
 
     def execute(self, tool_name: str, arguments: dict) -> dict:
@@ -1343,4 +1398,162 @@ class ToolExecutor:
             "count_failed": len(failed),
             "already_offline": [s for s in skipped if s != spare_substation],
             "message": f"⚠️ BLACKOUT: {len(failed)} substations taken offline. Only {spare_substation} remains operational."
+        }
+
+    # =========================================================================
+    # MACRO / MULTI-STEP TOOLS
+    # =========================================================================
+
+    def _run_resilience_test(self, substation: str) -> dict:
+        """Multi-step resilience test: fail → enable V2G → measure → restore."""
+        steps = []
+
+        # Step 1: Record baseline
+        status_before = self._get_system_status()
+        baseline_load = sum(
+            s.get('load_mw', 0)
+            for s in self.integrated_system.substations.values()
+            if s.get('operational', True)
+        )
+        steps.append({"step": "baseline", "total_load_mw": round(baseline_load, 1)})
+
+        # Step 2: Fail the substation
+        fail_result = self._fail_substation(substation)
+        if not fail_result.get('success'):
+            return {"success": False, "error": f"Could not fail {substation}: {fail_result.get('error', 'unknown')}", "steps": steps}
+        steps.append({"step": "fail_substation", "substation": substation, "result": "offline"})
+
+        # Step 3: Measure impact
+        post_fail_load = sum(
+            s.get('load_mw', 0)
+            for s in self.integrated_system.substations.values()
+            if s.get('operational', True)
+        )
+        load_lost = baseline_load - post_fail_load
+        steps.append({"step": "measure_impact", "load_lost_mw": round(load_lost, 1), "remaining_load_mw": round(post_fail_load, 1)})
+
+        # Step 4: Enable V2G on the failed substation
+        v2g_result = self._enable_v2g(substation)
+        v2g_recovery_kw = 0
+        if v2g_result.get('success'):
+            v2g_status = self._get_v2g_status()
+            v2g_recovery_kw = v2g_status.get('total_v2g_capacity_kw', 0)
+        steps.append({"step": "enable_v2g", "success": v2g_result.get('success', False), "recovery_kw": round(v2g_recovery_kw, 1)})
+
+        # Step 5: Calculate resilience score
+        recovery_pct = min(100, (v2g_recovery_kw / max(load_lost * 1000, 1)) * 100)
+        resilience_grade = 'A' if recovery_pct > 75 else ('B' if recovery_pct > 50 else ('C' if recovery_pct > 25 else 'D'))
+        steps.append({"step": "resilience_score", "recovery_pct": round(recovery_pct, 1), "grade": resilience_grade})
+
+        # Step 6: Restore
+        restore_result = self._restore_substation(substation)
+        steps.append({"step": "restore", "success": restore_result.get('success', False)})
+
+        return {
+            "success": True,
+            "substation": substation,
+            "resilience_grade": resilience_grade,
+            "recovery_percentage": round(recovery_pct, 1),
+            "load_lost_mw": round(load_lost, 1),
+            "v2g_recovery_kw": round(v2g_recovery_kw, 1),
+            "steps": steps,
+            "message": f"Resilience test complete for {substation}: Grade {resilience_grade} ({recovery_pct:.0f}% V2G recovery of {load_lost:.1f} MW lost)"
+        }
+
+    def _analyze_grid_vulnerability(self) -> dict:
+        """Analyze all substations and rank by vulnerability."""
+        vulnerabilities = []
+
+        for name, sub in self.integrated_system.substations.items():
+            if not sub.get('operational', True):
+                vulnerabilities.append({
+                    "substation": name,
+                    "status": "OFFLINE",
+                    "load_ratio": 0,
+                    "risk": "CRITICAL",
+                    "recommendation": "Restore immediately or enable V2G"
+                })
+                continue
+
+            load = sub.get('load_mw', 0)
+            capacity = sub.get('capacity_mva', 1)  # avoid div/0
+            load_ratio = load / capacity
+
+            if load_ratio > 0.85:
+                risk = "HIGH"
+                rec = "Pre-position V2G resources; consider load shedding"
+            elif load_ratio > 0.65:
+                risk = "MEDIUM"
+                rec = "Monitor closely; V2G standby recommended"
+            else:
+                risk = "LOW"
+                rec = "Operating within safe margins"
+
+            vulnerabilities.append({
+                "substation": name,
+                "status": "ONLINE",
+                "load_mw": round(load, 1),
+                "capacity_mva": capacity,
+                "load_ratio": round(load_ratio, 3),
+                "risk": risk,
+                "recommendation": rec
+            })
+
+        # Sort by load ratio descending
+        vulnerabilities.sort(key=lambda x: x.get('load_ratio', 0), reverse=True)
+
+        high_risk = [v for v in vulnerabilities if v['risk'] in ('HIGH', 'CRITICAL')]
+        overall_risk = 'HIGH' if len(high_risk) >= 2 else ('MEDIUM' if high_risk else 'LOW')
+
+        return {
+            "success": True,
+            "overall_risk": overall_risk,
+            "substations": vulnerabilities,
+            "high_risk_count": len(high_risk),
+            "total_substations": len(vulnerabilities),
+            "message": f"Grid vulnerability analysis: {overall_risk} overall risk. {len(high_risk)} substations at elevated risk."
+        }
+
+    def _prepare_for_event(self, event: str) -> dict:
+        """Orchestrate time, temperature, vehicles, and EV config for an event."""
+        EVENT_CONFIGS = {
+            "heatwave": {"hour": 14, "minute": 0, "temp": 102, "vehicles": 80, "ev_pct": 80, "label": "Summer Heatwave (2pm, 102°F)"},
+            "morning_rush": {"hour": 8, "minute": 30, "temp": 72, "vehicles": 100, "ev_pct": 70, "label": "Morning Rush Hour (8:30am)"},
+            "evening_peak": {"hour": 18, "minute": 0, "temp": 78, "vehicles": 90, "ev_pct": 75, "label": "Evening Peak (6pm)"},
+            "storm": {"hour": 22, "minute": 0, "temp": 45, "vehicles": 30, "ev_pct": 60, "label": "Winter Storm (10pm, 45°F)"},
+            "normal": {"hour": 12, "minute": 0, "temp": 72, "vehicles": 50, "ev_pct": 70, "label": "Normal Operations (noon, 72°F)"},
+        }
+
+        config = EVENT_CONFIGS.get(event)
+        if not config:
+            return {"success": False, "error": f"Unknown event: {event}. Valid: {list(EVENT_CONFIGS.keys())}"}
+
+        actions = []
+
+        # Set time
+        time_result = self._set_time(hour=config["hour"], minute=config["minute"])
+        actions.append({"action": "set_time", "success": time_result.get('success', False)})
+
+        # Set temperature
+        temp_result = self._set_temperature(temperature=config["temp"])
+        actions.append({"action": "set_temperature", "success": temp_result.get('success', False), "value": config["temp"]})
+
+        # Configure EV percentage
+        ev_result = self._configure_ev(ev_percentage=config["ev_pct"])
+        actions.append({"action": "configure_ev", "success": ev_result.get('success', False), "ev_pct": config["ev_pct"]})
+
+        # Spawn vehicles if simulation is running
+        if self.system_state.get('sumo_running'):
+            spawn_result = self._spawn_vehicles(count=config["vehicles"])
+            actions.append({"action": "spawn_vehicles", "success": spawn_result.get('success', False), "count": config["vehicles"]})
+
+        return {
+            "success": True,
+            "event": event,
+            "label": config["label"],
+            "actions_taken": actions,
+            "hour": config["hour"],
+            "minute": config["minute"],
+            "temperature": config["temp"],
+            "message": f"Environment prepared for {config['label']}. {len(actions)} systems adjusted."
         }

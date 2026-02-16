@@ -907,6 +907,11 @@ class ManhattanPowerGrid:
         """Log incident to database"""
         
         try:
+            # Guard: Check if db_manager and get_session are available
+            if not hasattr(db_manager, 'get_session') or not callable(getattr(db_manager, 'get_session', None)):
+                # Database not configured - skip logging (this is optional for simulation)
+                return
+            
             with db_manager.get_session() as session:
                 from config.database import Incident
                 

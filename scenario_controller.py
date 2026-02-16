@@ -154,8 +154,9 @@ class ScenarioController:
     def set_time(self, hour: float, minute: int = 0, second: int = 0):
         """Set simulation time with hours, minutes, and seconds"""
         # Convert to seconds since midnight
-        total_seconds = (int(hour) * 3600 + int(minute) * 60 + int(second)) % 86400
-        self.current_time_seconds = total_seconds
+        # If hour is a float (e.g. 20.5), it includes minutes
+        total_seconds = (hour * 3600 + int(minute) * 60 + int(second)) % 86400
+        self.current_time_seconds = int(total_seconds)
         self.last_update_time = time.time()  # Reset the update timer
 
         # Update load model with hour value

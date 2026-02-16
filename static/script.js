@@ -2,6 +2,15 @@
          * World-Class Markdown Renderer for Chatbot
          * Renders markdown with proper formatting (bold, italic, lists, code blocks, etc.)
          */
+        
+        // Initialize global socket connection
+        if (typeof io !== 'undefined') {
+            window.socket = io();
+            window.socket.on('connect', () => {
+                console.log('[System] Socket connected');
+            });
+        }
+
         window.renderMarkdown = function(text) {
             if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') {
                 // Fallback if libraries not loaded
@@ -323,12 +332,19 @@
         refreshExpiredTiles: false,
         fadeDuration: 0,
         maxZoom: 20,
-        minZoom: 10
+        minZoom: 10,
+        maxPitch: 85 // Allow looking closer to the horizon for 'free' feel
     });
 
-    // Make map globally accessible for AI map actions
     window.map = map;
     window.mapLoaded = false;
+
+    // Add zoom +/- and compass rotation controls
+    map.addControl(new mapboxgl.NavigationControl({
+        showCompass: true,
+        showZoom: true,
+        visualizePitch: true
+    }), 'bottom-right');
 
     // Wait for map to fully load before allowing AI actions
     map.on('load', async () => {
@@ -353,8 +369,8 @@
             });
         }
 
-        // 2. Enable Terrain
-        map.setTerrain({ 'source': 'mapbox-dem', 'exaggeration': 1.5 });
+        // 2. Enable Terrain - DISABLED BY DEFAULT to prevent vertical stretching
+        // map.setTerrain({ 'source': 'mapbox-dem', 'exaggeration': 0.5 });
 
         // 3. Add 3D Building Layer (Remove old one first to apply updates)
         if (map.getLayer('building-3d')) map.removeLayer('building-3d');
@@ -381,12 +397,12 @@
                         ['>', ['get', 'levels'], 0], ['*', ['get', 'levels'], 3],
                         10 // Default used for color scale
                     ],
-                    0, '#2a2a2a',
-                    50, '#3a3a3a',
-                    100, '#4a4a4a',
-                    200, '#5a5a5a',
-                    400, '#6a6a6a',
-                    800, '#7a7a7a'
+                    0, '#1a1f2c',    // Deep blue-black base
+                    50, '#2a3245',   // More saturated dark blue
+                    100, '#3a4660',  // Mid-tone blue-gray
+                    200, '#4a5a7a',  // Desaturated steel blue
+                    400, '#5a6e8e',  // Lighter steel
+                    800, '#6a82a2'   // Horizon blue
                 ],
                 
                 // Height: Robust logic with Fallbacks + Clamping
@@ -396,28 +412,55 @@
                     ['zoom'],
                     13, 0,
                     13.5, [
-                        'min', // CLAMP: Max 800m (fixes sky spikes)
+                        'min', // FINAL CAP: 350m (to catch extreme outliers without flattening the city)
                         [
-                            'case',
-                            ['>', ['get', 'height'], 0], ['get', 'height'], // Use real data
-                            ['>', ['get', 'levels'], 0], ['*', ['get', 'levels'], 3], // Estimate from floors
-                            10 // Fallback: 10m (fixes flat buildings)
+                            '*', // SCALING: 0.6x original height (preserves relative scale but reduces verticality)
+                            0.6,
+                            [
+                                'case',
+                                ['>', ['get', 'height'], 0], ['get', 'height'], // Use real data
+                                ['>', ['get', 'levels'], 0], ['*', ['get', 'levels'], 3], // Estimate from floors
+                                10 // Fallback: 10m
+                            ]
                         ],
-                        800
+                        350
                     ]
                 ],
                 
-                // Base: Standard logic
+                // Base: Clamped to prevent vertical pillars from bad data
                 'fill-extrusion-base': [
-                    'case',
-                    ['>', ['get', 'min_height'], 0], ['get', 'min_height'],
-                    0
+                    'min',
+                    ['case',
+                        ['>', ['get', 'min_height'], 0], ['get', 'min_height'],
+                        0
+                    ],
+                    50
                 ],
-                'fill-extrusion-opacity': 0.9
+                'fill-extrusion-opacity': 0.7
             }
         }, labelLayerId); // Insert under labels
 
         console.log('✅ 3D terrain and buildings enabled (Robust Mode)');
+
+        // Brighten road surfaces for visibility under 3D buildings
+        const roadLayers = ['road-street', 'road-minor', 'road-major', 'road-primary', 'road-secondary', 'road-tertiary',
+                            'road-street-low', 'road-minor-low', 'road-major-low'];
+        roadLayers.forEach(layerId => {
+            if (map.getLayer(layerId)) {
+                try {
+                    map.setPaintProperty(layerId, 'line-color', 'rgba(180, 190, 210, 0.3)');
+                    map.setPaintProperty(layerId, 'line-opacity', 0.4);
+                } catch(e) { /* some layers may not support these props */ }
+            }
+        });
+        // Also try the generic road-simple layer used in dark-v11
+        ['road-simple', 'road-street_limited'].forEach(layerId => {
+            if (map.getLayer(layerId)) {
+                try {
+                    map.setPaintProperty(layerId, 'line-color', 'rgba(160, 175, 200, 0.2)');
+                } catch(e) {}
+            }
+        });
 
         // Initialize power grid layers based on their initial state
         // Shorter delay since layers should exist now
@@ -1586,8 +1629,19 @@ interpolate(deltaTime) {
                 'legend-ev': stats.total_ev_stations || 0,
                 'legend-green': stats.green_lights || 0,
                 'legend-yellow': stats.yellow_lights || 0,
-                'legend-red': stats.red_lights || 0
+                'legend-red': stats.red_lights || 0,
+                // Footer Updates
+                'charging-stations': (networkState.ev_stations || []).filter(s => s.chargers_occupied && s.chargers_occupied > 0).length,
+                'system-status': (networkState.substations || []).some(s => !s.operational) ? "GRID ALERT" : "System Online"
             };
+
+            // Update status indicator color
+            const statusIndicator = document.getElementById('system-indicator');
+            if (statusIndicator) {
+                const isNormal = updates['system-status'] === "System Online";
+                statusIndicator.style.backgroundColor = isNormal ? '#00ff88' : '#ff0000';
+                statusIndicator.style.boxShadow = isNormal ? '0 0 10px #00ff88' : '0 0 10px #ff0000';
+            }
             
             Object.entries(updates).forEach(([id, value]) => {
                 const el = document.getElementById(id);
@@ -1821,18 +1875,18 @@ interpolate(deltaTime) {
                 paint: {
                     'icon-color': [
                         'case', 
-                        ['get', 'is_v2g_active'], '#00FFFF',  // Cyan for V2G
-                        ['get', 'is_stranded'], '#ff00ff',    // Purple for stranded
-                        ['get', 'is_charging'], '#00ffff',    // Cyan for charging
-                        ['get', 'is_queued'], '#ffff00',      // Yellow for queued
-                        ['get', 'is_circling'], '#ff8c00',    // Orange for circling
+                        ['get', 'is_v2g_active'], '#00E5FF',  // Bright cyan for V2G
+                        ['get', 'is_stranded'], '#E040FB',    // Violet for stranded
+                        ['get', 'is_charging'], '#40C4FF',    // Light blue for charging
+                        ['get', 'is_queued'], '#B388FF',      // Lavender for queued
+                        ['get', 'is_circling'], '#FF80AB',    // Pink for circling
                         ['to-boolean', ['get', 'is_ev']], [   // EV gradient by battery
                             'case',
-                            ['<', ['get', 'battery_percent'], 20], '#ff0000',  // Red
-                            ['<', ['get', 'battery_percent'], 50], '#ffa500',  // Orange
-                            '#00FF99'  // NEON GREEN for max contrast
+                            ['<', ['get', 'battery_percent'], 20], '#FF44AA',  // Magenta = low
+                            ['<', ['get', 'battery_percent'], 50], '#4488FF',  // Blue = medium
+                            '#00FFD4'  // Cyan-mint = high
                         ],
-                        '#6464ff'  // Light blue for gas
+                        '#8899AA'  // Slate gray for gas
                     ],
                     'icon-halo-color': '#000000',  // Black halo
                     'icon-halo-width': 2,          // Thick outline
@@ -2369,7 +2423,7 @@ function initializeEVStationLayer() {
                     .filter(cable => cable.path && cable.path.length > 1)
                     .map(cable => ({
                         type: 'Feature',
-                        geometry: { type: 'LineString', coordinates: cable.path },
+                        geometry: { type: 'LineString', coordinates: cable.path.map(c => [c[0], c[1]]) },
                         properties: { operational: cable.operational, id: cable.id }
                     }));
                 const primaryData = { type: 'FeatureCollection', features: primaryFeatures };
@@ -2413,7 +2467,7 @@ function initializeEVStationLayer() {
                     .filter(cable => cable.path && cable.path.length > 1)
                     .map(cable => ({
                         type: 'Feature',
-                        geometry: { type: 'LineString', coordinates: cable.path },
+                        geometry: { type: 'LineString', coordinates: cable.path.map(c => [c[0], c[1]]) },
                         properties: { operational: cable.operational, substation: cable.substation || 'unknown', id: cable.id }
                     }));
                 const secondaryData = { type: 'FeatureCollection', features: secondaryFeatures };
@@ -2475,33 +2529,51 @@ function initializeEVStationLayer() {
                     id: 'traffic-lights',
                     type: 'circle',
                     source: 'traffic-lights',
-                    minzoom: 14,  // HIDE when zoomed out (City View)
+                    minzoom: 13,
                     paint: {
-                        // Dynamic Sizing: Fade in from 0px to full size
                         'circle-radius': [
                             'interpolate', ['linear'], ['zoom'],
-                            14, 0,    // Invisible
-                            15, 2,    // Subtle dots
-                            16, 4,
-                            18, 6     // Full size
+                            13, 1,
+                            14, 2.5,
+                            15, 4,
+                            16, 5.5,
+                            18, 8
                         ],
-                        'circle-color': ['get', 'color'],
-                        // Opacity Fade: Smooth transition
+                        // Remap traffic signal colors to muted/pastel versions
+                        'circle-color': [
+                            'match', ['get', 'color'],
+                            '#00ff00', 'rgba(120, 220, 120, 0.85)',   // Green → muted sage
+                            '#ff0000', 'rgba(220, 110, 110, 0.85)',   // Red → muted rose
+                            '#ffff00', 'rgba(220, 200, 90, 0.85)',    // Yellow → muted amber
+                            'rgba(160, 160, 160, 0.7)'               // fallback gray
+                        ],
                         'circle-opacity': [
                             'interpolate', ['linear'], ['zoom'],
-                            14, 0,
-                            15, 0.95
+                            13, 0,
+                            14, 0.75,
+                            15, 0.9
                         ],
-                        'circle-stroke-width': 1,
-                        'circle-stroke-color': '#ffffff',
+                        'circle-stroke-width': [
+                            'interpolate', ['linear'], ['zoom'],
+                            14, 0.5,
+                            16, 1
+                        ],
+                        'circle-stroke-color': 'rgba(40, 40, 40, 0.6)',
                         'circle-stroke-opacity': [
                             'interpolate', ['linear'], ['zoom'],
-                            14, 0,
-                            15, 0.5
+                            13, 0,
+                            14.5, 0.5
                         ],
-                        'circle-blur': 0.2
+                        'circle-blur': 0.2,
+                        'circle-pitch-alignment': 'map',
+                        'circle-pitch-scale': 'map'
                     }
                 });
+
+                // Ensure vehicles always render ABOVE traffic lights
+                if (map.getLayer('vehicles-symbols')) {
+                    map.moveLayer('vehicles-symbols');
+                }
             }
             
             if (!lightsClickBound && map.getLayer('traffic-lights')) {
@@ -3113,36 +3185,42 @@ function initializeEVStationLayer() {
     }
 
     // Track simulation time with local seconds counter
-    let displayHours = 12;
-    let displayMinutes = 0;
-    let displaySeconds = 0;
+    // Track simulation time with local seconds counter
+    const now = new Date();
+    let displayHours = now.getHours();
+    let displayMinutes = now.getMinutes();
+    let displaySeconds = now.getSeconds();
     let timeInitialized = false;
 
     function updateTime() {
         const timeEl = document.getElementById('time');
         if (!timeEl) return;
 
-        // Only fetch from backend ONCE at initialization
+        // NEW: Allow external updates (e.g., from scenario-controls.js) to override checks
         if (!timeInitialized) {
             fetch('/api/scenario/status')
-                .then(response => response.json())
-                .then(data => {
-                    if (data.success && data.time_formatted) {
-                        const timeMatch = data.time_formatted.match(/(\d+):(\d+)/);
-                        if (timeMatch) {
-                            displayHours = parseInt(timeMatch[1]);
-                            displayMinutes = parseInt(timeMatch[2]);
-                            displaySeconds = 0;
-                            timeInitialized = true;
-                        }
-                    }
-                })
-                .catch(() => {
-                    // If fetch fails, start from 12:00:00
-                    timeInitialized = true;
-                });
-            return; // Don't increment on first call, wait for backend response
+
+
+        // Increment seconds every call (called every 1 second)
+        displaySeconds++;
+    }
+
+    // EXPOSED: Function for scenario-controls.js to force update time
+    window.updateLocalTime = function(hours, minutes, seconds = 0) {
+        displayHours = parseInt(hours);
+        displayMinutes = parseInt(minutes);
+        displaySeconds = parseInt(seconds);
+        timeInitialized = true; // Ensure logic runs
+        
+        // Immediate update to UI to prevent flicker
+        const timeEl = document.getElementById('time');
+        if (timeEl) {
+            const ampm = displayHours >= 12 ? 'PM' : 'AM';
+            const hours12 = displayHours % 12 || 12;
+            const secsStr = String(displaySeconds).padStart(2, '0');
+            timeEl.textContent = `${String(hours12).padStart(2, '0')}:${String(displayMinutes).padStart(2, '0')}:${secsStr} ${ampm}`;
         }
+    };
 
         // Increment seconds every call (called every 1 second)
         displaySeconds++;
@@ -3167,6 +3245,50 @@ function initializeEVStationLayer() {
 
     // Expose updateTime globally for scenario handlers
     window.updateTime = updateTime;
+
+    // Global debounce: any time setter (chatbot, slider) can set this to suppress auto-advance
+    window._lastManualTimeUpdate = 0;
+
+    // Allow external code to sync the local clock (e.g. scenario slider, chatbot)
+    window.syncDisplayTime = function(hour, minute) {
+        displayHours = Math.floor(hour);
+        displayMinutes = minute !== undefined ? minute : Math.round((hour % 1) * 60);
+        displaySeconds = 0;
+        timeInitialized = true;
+        window._lastManualTimeUpdate = Date.now();
+        // Immediately update the footer
+        const timeEl = document.getElementById('time');
+        if (timeEl) {
+            const ampm = displayHours >= 12 ? 'PM' : 'AM';
+            const hours12 = displayHours % 12 || 12;
+            timeEl.textContent = `${String(hours12).padStart(2, '0')}:${String(displayMinutes).padStart(2, '0')}:00 ${ampm}`;
+        }
+    };
+
+    // Sync local clock when chatbot changes time via socket
+    if (window.socket) {
+        window.socket.on('scenario_time_update', (data) => {
+            if (data.hour !== undefined) {
+                displayHours = Math.floor(data.hour);
+                displayMinutes = data.minute || Math.round((data.hour % 1) * 60);
+                displaySeconds = 0;
+                timeInitialized = true;
+                // Immediately update the footer
+                const timeEl = document.getElementById('time');
+                if (timeEl) {
+                    const ampm = displayHours >= 12 ? 'PM' : 'AM';
+                    const hours12 = displayHours % 12 || 12;
+                    timeEl.textContent = `${String(hours12).padStart(2, '0')}:${String(displayMinutes).padStart(2, '0')}:${String(displaySeconds).padStart(2, '0')} ${ampm}`;
+                }
+            }
+        });
+        window.socket.on('scenario_temp_update', (data) => {
+            if (data.temperature !== undefined) {
+                const tempEl = document.getElementById('temperature');
+                if (tempEl) tempEl.textContent = Math.round(data.temperature);
+            }
+        });
+    }
 
     function showBlackoutAlert(failedCount, operationalCount) {
         const alertEl = document.getElementById('blackout-alert');
@@ -4153,12 +4275,36 @@ function initializeEVStationLayer() {
 
     // Separated normal chat logic
     function proceedWithNormalChat(text, box) {
-        box.innerHTML += `<div class="typing">AI is analyzing…</div>`;
+        box.innerHTML += `<div class="typing">AI is analyzing…<div class="tool-progress-feed" id="toolProgressFeed" style="display:none;"></div></div>`;
         const typingRef = box.querySelector('.typing');
+
+        // Listen for real-time tool progress events
+        const progressHandler = (data) => {
+            const feed = document.getElementById('toolProgressFeed');
+            if (feed) {
+                feed.style.display = 'flex';
+                // Update the main typing text
+                const mainText = typingRef.childNodes[0];
+                if (mainText && mainText.nodeType === Node.TEXT_NODE) {
+                    mainText.textContent = `Executing tools (step ${data.iteration})…`;
+                }
+                // Add progress item
+                const item = document.createElement('div');
+                item.className = 'tool-progress-item';
+                item.innerHTML = `<div class="spinner"></div><span>🔧 ${data.tool}(${Object.values(data.args || {}).join(', ')})</span>`;
+                feed.appendChild(item);
+                box.scrollTop = box.scrollHeight;
+            }
+        };
+        if (window.socket) {
+            window.socket.on('chatbot_tool_progress', progressHandler);
+        }
 
         // Use the enhanced Ultra-Intelligent AI chat endpoint
         fetch('/api/ai/chat', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({message:text, user_id:'web_user'})})
         .then(r=>r.json()).then(data=>{
+            // Clean up progress handler
+            if (window.socket) window.socket.off('chatbot_tool_progress', progressHandler);
             if (typingRef) typingRef.remove();
 
             // Handle ultra-intelligent chatbot response format
@@ -4183,6 +4329,31 @@ function initializeEVStationLayer() {
                 responseHtml += `<div style="position:absolute;top:0;left:0;width:4px;height:100%;background:linear-gradient(180deg,#00ff88,#00d4ff);box-shadow:0 0 12px rgba(0,255,136,0.5);"></div>`;
                 responseHtml += `<strong style="color:#00ff88;display:flex;align-items:center;margin-bottom:10px;font-size:14px;letter-spacing:0.3px;"><svg width="18" height="18" style="margin-right:8px;" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 5.58 2 10c0 2.39 1.31 4.53 3.4 6.01-.14.52-.51 1.89-.59 2.24-.09.37.13.73.5.82.26.06.52-.03.7-.21.28-.27 1.25-1.2 1.77-1.7.79.22 1.63.34 2.52.34 5.52 0 10-3.58 10-8s-4.48-8-10-8Z"/></svg>Ultra-Intelligent AI</strong>`;
                 responseHtml += `<div style="line-height:1.7;color:rgba(255,255,255,0.95);font-size:14px;padding-left:26px;" class="markdown-content">${window.renderMarkdown(aiResponse.text)}</div>`;
+
+                // ═══ GLASS BOX: Show tool execution transparency ═══
+                if (aiResponse.tool_calls_made && aiResponse.tool_calls_made.length > 0) {
+                    const toolCount = aiResponse.tool_calls_made.length;
+                    const iterations = aiResponse.iterations || 1;
+                    responseHtml += `<div class="glass-box-panel" style="margin-top:12px;padding-left:26px;">`;
+                    responseHtml += `<div class="glass-box-header" onclick="this.parentElement.classList.toggle('expanded')" style="cursor:pointer;display:flex;align-items:center;gap:8px;padding:8px 12px;background:rgba(0,170,255,0.08);border:1px solid rgba(0,170,255,0.2);border-radius:10px;transition:all 0.3s ease;">`;
+                    responseHtml += `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#00aaff" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>`;
+                    responseHtml += `<span style="font-size:12px;color:#00aaff;font-weight:600;">Agent Actions</span>`;
+                    responseHtml += `<span style="font-size:11px;color:rgba(0,170,255,0.7);margin-left:auto;">${toolCount} tool${toolCount > 1 ? 's' : ''} · ${iterations} step${iterations > 1 ? 's' : ''}</span>`;
+                    responseHtml += `<svg class="glass-box-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#00aaff" stroke-width="2" style="transition:transform 0.3s;"><polyline points="6 9 12 15 18 9"/></svg>`;
+                    responseHtml += `</div>`;
+                    responseHtml += `<div class="glass-box-body" style="max-height:0;overflow:hidden;transition:max-height 0.4s ease;">`;
+                    responseHtml += `<div style="padding:8px 0 4px 0;display:flex;flex-direction:column;gap:4px;">`;
+                    aiResponse.tool_calls_made.forEach((tc, idx) => {
+                        const icon = tc.success ? '✓' : '✗';
+                        const color = tc.success ? '#00ff88' : '#ff6b6b';
+                        const argsStr = Object.entries(tc.args || {}).map(([k,v]) => `${k}: ${JSON.stringify(v)}`).join(', ');
+                        responseHtml += `<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:rgba(255,255,255,0.02);border-radius:8px;border-left:3px solid ${color};">`;
+                        responseHtml += `<span style="color:${color};font-weight:700;font-size:13px;min-width:16px;">${icon}</span>`;
+                        responseHtml += `<code style="font-size:11px;color:#e0e0ff;font-family:'JetBrains Mono',monospace;word-break:break-all;">${tc.tool}(${argsStr})</code>`;
+                        responseHtml += `</div>`;
+                    });
+                    responseHtml += `</div></div></div>`;
+                }
 
                 // Add suggestions if available
                 if (aiResponse.suggestions && aiResponse.suggestions.length > 0) {
@@ -4847,135 +5018,246 @@ function initializeEVStationLayer() {
         }
     });
 
-        // ==========================================
-    // 3D/2D TOGGLE CONTROL
     // ==========================================
-    
-    // Create 3D/2D toggle button in top-left corner
-    const toggle3DButton = document.createElement('button');
-    toggle3DButton.id = '3d-toggle';
-    toggle3DButton.innerHTML = '🗻 3D';
-    toggle3DButton.style.cssText = `
-        position: fixed;
-        top: 10px;
-        left: 10px;
-        padding: 10px 16px;
-        background: rgba(0, 0, 0, 0.9);
-        color: #00ff88;
-        border: 2px solid #00ff88;
-        border-radius: 6px;
-        font-size: 14px;
-        font-weight: 600;
-        cursor: pointer;
-        z-index: 9999;
-        transition: all 0.3s ease;
-        box-shadow: 0 4px 12px rgba(0, 255, 136, 0.3);
+    // LEGEND TOGGLE
+    // ==========================================
+    window.toggleLegend = function() {
+        const legend = document.getElementById('system-legend');
+        const btn = document.getElementById('legend-toggle-btn');
+        if (legend) {
+            legend.classList.toggle('collapsed');
+            if (btn) {
+                btn.textContent = legend.classList.contains('collapsed') ? '▶' : '▼';
+            }
+        }
+    };
+
+    // ==========================================
+    // 3D MAP CONTROLS MENU
+    // ==========================================
+
+    // State
+    let mcBuildings = true;
+    let mcTerrain = false; // Default to OFF
+    let mcOrbit = false;
+    let mcOrbitRaf = null;
+
+    // Build DOM
+    const mcContainer = document.createElement('div');
+    mcContainer.className = 'map-controls';
+    mcContainer.innerHTML = `
+        <button class="map-controls-toggle" id="mcToggle" title="Map Controls">⚙</button>
+        <div class="map-controls-panel" id="mcPanel">
+            <div class="mc-section">
+                <div class="mc-section-title">View</div>
+                <div class="mc-row">
+                    <label><span class="mc-icon">🗺️</span>2D / 3D</label>
+                    <div class="mc-switch on" id="mc3DSwitch"><div class="mc-knob"></div></div>
+                </div>
+            </div>
+            <div class="mc-section">
+                <div class="mc-section-title">Layers</div>
+                <div class="mc-row">
+                    <label><span class="mc-icon">🏗️</span>Buildings</label>
+                    <div class="mc-switch on" id="mcBuildingsSwitch"><div class="mc-knob"></div></div>
+                </div>
+                <div class="mc-row">
+                    <label><span class="mc-icon">⛰️</span>Terrain</label>
+                    <div class="mc-switch" id="mcTerrainSwitch"><div class="mc-knob"></div></div>
+                </div>
+            </div>
+            <div class="mc-section">
+                <div class="mc-section-title">Camera Control</div>
+                <div class="mc-row">
+                    <button class="mc-btn-icon" id="mcRotateLeft" title="Rotate Left (Q)">↺</button>
+                    <button class="mc-btn-icon" id="mcPitchUp" title="Tilt Up (R)">▲</button>
+                    <button class="mc-btn-icon" id="mcPitchDown" title="Tilt Down (F)">▼</button>
+                    <button class="mc-btn-icon" id="mcRotateRight" title="Rotate Right (E)">↻</button>
+                </div>
+                <div class="mc-help-text">
+                    Use <b>W A S D</b> to Move<br>
+                    <b>Q E</b> to Rotate • <b>R F</b> to Tilt<br>
+                    <i>Right-Click + Drag to Rotate/Tilt</i>
+                </div>
+                <button class="mc-btn" id="mcOrbitBtn" style="margin-top: 8px;"><span>🎬</span> Cinematic Orbit</button>
+                <button class="mc-btn" id="mcResetBtn"><span>🔄</span> Reset View</button>
+            </div>
+            <div class="mc-section">
+                <div class="mc-section-title">Readout</div>
+                <div class="mc-readout">
+                    <div class="mc-readout-item">
+                        <div class="mc-readout-label">Pitch</div>
+                        <div class="mc-readout-value" id="mcPitch">60°</div>
+                    </div>
+                    <div class="mc-readout-item">
+                        <div class="mc-readout-label">Bearing</div>
+                        <div class="mc-readout-value" id="mcBearing">-18°</div>
+                    </div>
+                    <div class="mc-readout-item">
+                        <div class="mc-readout-label">Zoom</div>
+                        <div class="mc-readout-value" id="mcZoom">14.5</div>
+                    </div>
+                </div>
+            </div>
+        </div>
     `;
-    
-    // Hover effects
-    toggle3DButton.addEventListener('mouseenter', () => {
-        toggle3DButton.style.background = 'rgba(0, 255, 136, 0.2)';
-        toggle3DButton.style.transform = 'scale(1.05)';
-    });
-    toggle3DButton.addEventListener('mouseleave', () => {
-        toggle3DButton.style.background = 'rgba(0, 0, 0, 0.9)';
-        toggle3DButton.style.transform = 'scale(1)';
-    });
-    
-    let is3DMode = true;  // Start in 3D mode
-    
-    toggle3DButton.addEventListener('click', () => {
-        is3DMode = !is3DMode;
-        
-        if (is3DMode) {
-            // Enable 3D mode (Cinematic)
-            map.easeTo({
-                pitch: 60,
-                bearing: -17.6,
-                duration: 1000
-            });
+    document.body.appendChild(mcContainer);
+
+    // --- Keyboard Controls (WASD + QERF) ---
+    window.addEventListener('keydown', (e) => {
+        // Ignore if typing in an input
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+        const step = 50; // pixels to pan
+        const rotateStep = 15; // degrees
+        const pitchStep = 10; // degrees
+
+        switch(e.key.toLowerCase()) {
+            // Pan
+            case 'w': case 'arrowup': map.panBy([0, -step]); break;
+            case 's': case 'arrowdown': map.panBy([0, step]); break;
+            case 'a': case 'arrowleft': map.panBy([-step, 0]); break;
+            case 'd': case 'arrowright': map.panBy([step, 0]); break;
             
-            if (map.getSource('mapbox-dem')) {
-                map.setTerrain({
-                    source: 'mapbox-dem',
-                    exaggeration: 1.5
-                });
-            }
+            // Rotate
+            case 'q': map.easeTo({ bearing: map.getBearing() - rotateStep, duration: 200 }); break;
+            case 'e': map.easeTo({ bearing: map.getBearing() + rotateStep, duration: 200 }); break;
             
-            if (map.getLayer('building-3d')) {
-                // RESTORE 3D: Use robust height logic and standard dark colors
-                map.setPaintProperty('building-3d', 'fill-extrusion-height', [
-                    'interpolate',
-                    ['linear'],
-                    ['zoom'],
-                    13, 0,
-                    13.5, [
-                        'min',
-                        [
-                            'case',
-                            ['>', ['get', 'height'], 0], ['get', 'height'],
-                            ['>', ['get', 'levels'], 0], ['*', ['get', 'levels'], 3],
-                            10
-                        ],
-                        800
-                    ]
-                ]);
-                
-                map.setPaintProperty('building-3d', 'fill-extrusion-color', [
-                    'interpolate',
-                    ['linear'],
-                    ['case',
-                        ['>', ['get', 'height'], 0], ['get', 'height'],
-                        ['>', ['get', 'levels'], 0], ['*', ['get', 'levels'], 3],
-                        10
-                    ],
-                    0, '#2a2a2a',
-                    50, '#3a3a3a',
-                    100, '#4a4a4a',
-                    200, '#5a5a5a',
-                    400, '#6a6a6a',
-                    800, '#7a7a7a'
-                ]);
-            }
-            
-            toggle3DButton.innerHTML = '🗻 3D';
-            console.log('✅ 3D mode enabled (Cinematic)');
-        } else {
-            // Enable 2D mode (Data-Rich Heatmap)
-            map.easeTo({
-                pitch: 0,
-                bearing: 0,
-                duration: 1000
-            });
-            
-            map.setTerrain(null);
-            
-            if (map.getLayer('building-3d')) {
-                // KEEP VISIBLE but FLATTEN and COLOR by height (Heatmap)
-                map.setPaintProperty('building-3d', 'fill-extrusion-height', 0);
-                
-                map.setPaintProperty('building-3d', 'fill-extrusion-color', [
-                    'interpolate',
-                    ['linear'],
-                    ['case',
-                        ['>', ['get', 'height'], 0], ['get', 'height'],
-                        ['>', ['get', 'levels'], 0], ['*', ['get', 'levels'], 3],
-                        10
-                    ],
-                    0, '#1a1a1a',      // Background/Low
-                    30, '#333333',     // Mid-low
-                    100, '#555555',    // Mid-high
-                    300, '#6688aa'     // Landmarks (Blue-grey)
-                ]);
-            }
-            
-            toggle3DButton.innerHTML = '🗺️ 2D';
-            console.log('✅ 2D mode enabled (Data-Rich Heatmap)');
+            // Pitch
+            case 'r': map.easeTo({ pitch: Math.min(map.getPitch() + pitchStep, 85), duration: 200 }); break;
+            case 'f': map.easeTo({ pitch: Math.max(map.getPitch() - pitchStep, 0), duration: 200 }); break;
         }
     });
-    
-    document.body.appendChild(toggle3DButton);
-    console.log('✅ 3D/2D toggle button added at top-left');
+
+    // --- Button Event Listeners ---
+    // Wait for DOM to update
+    setTimeout(() => {
+        document.getElementById('mcRotateLeft').addEventListener('click', () => 
+            map.easeTo({ bearing: map.getBearing() - 45, duration: 500 }));
+        document.getElementById('mcRotateRight').addEventListener('click', () => 
+            map.easeTo({ bearing: map.getBearing() + 45, duration: 500 }));
+        document.getElementById('mcPitchUp').addEventListener('click', () => 
+            map.easeTo({ pitch: Math.min(map.getPitch() + 15, 85), duration: 500 }));
+        document.getElementById('mcPitchDown').addEventListener('click', () => 
+            map.easeTo({ pitch: Math.max(map.getPitch() - 15, 0), duration: 500 }));
+    }, 100);
+
+    const mcPanel = document.getElementById('mcPanel');
+    const mcToggleBtn = document.getElementById('mcToggle');
+
+    // Toggle panel open/close
+    mcToggleBtn.addEventListener('click', () => {
+        mcPanel.classList.toggle('open');
+    });
+    // Close when clicking outside
+    document.addEventListener('click', (e) => {
+        if (!mcContainer.contains(e.target)) mcPanel.classList.remove('open');
+    });
+
+    // --- 2D/3D toggle ---
+    let mc3D = true;
+    const mc3DSwitch = document.getElementById('mc3DSwitch');
+    mc3DSwitch.addEventListener('click', () => {
+        mc3D = !mc3D;
+        mc3DSwitch.classList.toggle('on', mc3D);
+        if (mc3D) {
+            map.easeTo({ pitch: 60, bearing: -17.6, duration: 1000 });
+            // Restore terrain + buildings to 3D
+            if (mcTerrain && map.getSource('mapbox-dem')) {
+                map.setTerrain({ source: 'mapbox-dem', exaggeration: 0.5 });
+            }
+            if (mcBuildings && map.getLayer('building-3d')) {
+                map.setPaintProperty('building-3d', 'fill-extrusion-height', [
+                    'interpolate', ['linear'], ['zoom'],
+                    13, 0,
+                    13.5, ['min', ['case',
+                        ['>', ['get', 'height'], 0], ['get', 'height'],
+                        ['>', ['get', 'levels'], 0], ['*', ['get', 'levels'], 3],
+                        10
+                    ], 350]
+                ]);
+            }
+        } else {
+            map.easeTo({ pitch: 0, bearing: 0, duration: 1000 });
+            map.setTerrain(null);
+            if (map.getLayer('building-3d')) {
+                map.setPaintProperty('building-3d', 'fill-extrusion-height', 0);
+            }
+        }
+    });
+
+    // --- Buildings toggle ---
+    const mcBuildingsSwitch = document.getElementById('mcBuildingsSwitch');
+    mcBuildingsSwitch.addEventListener('click', () => {
+        mcBuildings = !mcBuildings;
+        mcBuildingsSwitch.classList.toggle('on', mcBuildings);
+        if (map.getLayer('building-3d')) {
+            map.setLayoutProperty('building-3d', 'visibility', mcBuildings ? 'visible' : 'none');
+        }
+    });
+
+    // --- Terrain toggle ---
+    const mcTerrainSwitch = document.getElementById('mcTerrainSwitch');
+    mcTerrainSwitch.addEventListener('click', () => {
+        mcTerrain = !mcTerrain;
+        mcTerrainSwitch.classList.toggle('on', mcTerrain);
+        if (mcTerrain) {
+            if (map.getSource('mapbox-dem')) {
+                map.setTerrain({ source: 'mapbox-dem', exaggeration: 0.5 });
+            }
+        } else {
+            map.setTerrain(null);
+        }
+    });
+
+    // --- Cinematic Orbit ---
+    const mcOrbitBtn = document.getElementById('mcOrbitBtn');
+    function startOrbit() {
+        mcOrbit = true;
+        mcOrbitBtn.classList.add('active');
+        mcOrbitBtn.innerHTML = '<span>⏹️</span> Stop Orbit';
+        function frame() {
+            if (!mcOrbit) return;
+            map.rotateTo((map.getBearing() + 0.15) % 360, { duration: 0, easing: t => t });
+            mcOrbitRaf = requestAnimationFrame(frame);
+        }
+        mcOrbitRaf = requestAnimationFrame(frame);
+    }
+    function stopOrbit() {
+        mcOrbit = false;
+        if (mcOrbitRaf) cancelAnimationFrame(mcOrbitRaf);
+        mcOrbitRaf = null;
+        mcOrbitBtn.classList.remove('active');
+        mcOrbitBtn.innerHTML = '<span>🎬</span> Cinematic Orbit';
+    }
+    mcOrbitBtn.addEventListener('click', () => {
+        mcOrbit ? stopOrbit() : startOrbit();
+    });
+
+    // --- Reset View ---
+    document.getElementById('mcResetBtn').addEventListener('click', () => {
+        stopOrbit();
+        map.flyTo({
+            center: [-73.980, 40.758],
+            zoom: 14.5,
+            pitch: 60,
+            bearing: -17.6,
+            duration: 1500,
+            essential: true
+        });
+    });
+
+    // --- Live Readout ---
+    const mcPitchEl = document.getElementById('mcPitch');
+    const mcBearingEl = document.getElementById('mcBearing');
+    const mcZoomEl = document.getElementById('mcZoom');
+    map.on('move', () => {
+        mcPitchEl.textContent = `${Math.round(map.getPitch())}°`;
+        mcBearingEl.textContent = `${Math.round(map.getBearing())}°`;
+        mcZoomEl.textContent = map.getZoom().toFixed(1);
+    });
+
+    console.log('✅ 3D Map Controls menu added at top-right');
 
     // ==========================================
     // DEBUG HELPER FUNCTION
