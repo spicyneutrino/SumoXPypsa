@@ -96,6 +96,18 @@
         <h1>Manhattan Power Grid</h1>
         <div class="subtitle">Advanced Operations & Real-time Analytics</div>
         
+        <!-- Quick Tools - Always Visible -->
+        <div class="tools-section" style="margin-bottom: 16px;">
+            <div class="btn-group" style="display: flex; gap: 8px;">
+                <button class="btn btn-secondary" onclick="captureSnapshot()" style="flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px;">
+                    <span style="font-size: 16px;">📸</span> Snapshot
+                </button>
+                <button class="btn btn-secondary" onclick="generateReport()" style="flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px;">
+                    <span style="font-size: 16px;">📄</span> Report
+                </button>
+            </div>
+        </div>
+        
         <!-- Main Statistics -->
         <div id="section-stats" class="stats-grid tab tab-overview">
             <div class="stat-card">
@@ -362,7 +374,7 @@
             <!-- V2G Controls -->
             <div class="btn-group" style="margin-top:16px;">
                 <button class="btn btn-secondary" onclick="testV2G()">🧪 Test V2G</button>
-                <button class="btn btn-secondary" onclick="updateV2GDashboard()">🔄 Refresh</button>
+                <button class="btn btn-secondary" onclick="refreshV2GDashboard()">🔄 Refresh</button>
             </div>
         </div>
         
@@ -414,7 +426,7 @@
             <div class="layer-item">
                 <span>13.8kV Cables</span>
                 <label class="toggle">
-                    <input type="checkbox" id="layer-primary" onchange="toggleLayer('primary')">
+                    <input type="checkbox" checked id="layer-primary" onchange="toggleLayer('primary')">
                     <span class="slider"></span>
                 </label>
             </div>
@@ -543,17 +555,17 @@
 
 
     <!-- Custom JavaScript -->
-    <script src="/static/script.js?v=nocache_1769983928"></script>
-    <script src="/static/ai-enhanced.js?v=nocache_1769983928"></script>
-    <script src="/static/ai-functions.js?v=nocache_1769983928"></script>
-    <script src="/static/world-class-map.js?v=nocache_1769983928"></script>
-    <script src="/static/scenario-director.js?v=nocache_1769983928"></script>
-    <script src="/static/chatbot-scenarios.js?v=nocache_1769983928"></script>
+    <script src="/static/script.js?v=nocache_1771265000"></script>
+    <script src="/static/ai-enhanced.js?v=nocache_1771265000"></script>
+    <script src="/static/ai-functions.js?v=nocache_1771265000"></script>
+    <script src="/static/world-class-map.js?v=nocache_1771265000"></script>
+    <script src="/static/scenario-director.js?v=nocache_1771265000"></script>
+    <script src="/static/chatbot-scenarios.js?v=nocache_1771265000"></script>
 
     <!-- Scenario Controller -->
-    <script src="/static/traffic-patterns.js?v=nocache_1769983928"></script>
-    <script src="/static/time-vehicle-manager.js?v=nocache_1769983928"></script>
-    <script src="/static/scenario-controls.js?v=nocache_1769983928"></script>
-    <script src="/static/chatbot-scenario-llm.js?v=nocache_1769983928"></script>
+    <script src="/static/traffic-patterns.js?v=nocache_1771265000"></script>
+    <script src="/static/time-vehicle-manager.js?v=nocache_1771265000"></script>
+    <script src="/static/scenario-controls.js?v=nocache_1771265000"></script>
+    <script src="/static/chatbot-scenario-llm.js?v=nocache_1771265000"></script>
 </body>
 </html>

@@ -153,9 +153,7 @@ ai_chatbot = ManhattanAIChatbot(integrated_system=integrated_system, ml_engine=m
 
 # Initialize ULTRA-INTELLIGENT CHATBOT with typo correction and suggestions
 try:
-    from enhanced_v2g_manager import initialize_enhanced_v2g
-    enhanced_v2g_manager = initialize_enhanced_v2g(integrated_system)
-    ultra_chatbot = initialize_ultra_intelligent_chatbot(integrated_system, ml_engine, enhanced_v2g_manager, app)
+    ultra_chatbot = initialize_ultra_intelligent_chatbot(integrated_system, ml_engine, v2g_manager, app)
     print("ULTRA-INTELLIGENT CHATBOT WITH TYPO CORRECTION INTEGRATED")
 except Exception as e:
     print(f"Ultra-Intelligent Chatbot not available: {e}")
@@ -383,7 +381,7 @@ def simulation_loop():
     TRAFFIC_LIGHT_CYCLE = 60       # 60 seconds - Realistic traffic light cycle
     POWER_GRID_UPDATE = 5          # 5 seconds - Realistic SCADA/state estimation
     EV_LOAD_UPDATE = 5             # 5 seconds - Realistic smart meter updates
-    V2G_UPDATE = 60                # 60 seconds - Realistic V2G state changes
+    V2G_UPDATE = 1                 # 1 second -  Accelerated for demo feedback
 
     # Convert to SUMO steps (multiply by 10 because 1 SUMO step = 0.1s)
     TRAFFIC_LIGHT_STEPS = int(TRAFFIC_LIGHT_CYCLE / SUMO_STEP_TIME)  # 600 steps
@@ -890,6 +888,42 @@ def debug_ev_stations():
 # 2. NETWORK & STATUS ROUTES
 # ============================================================================
 
+@app.route('/api/export-state')
+def export_state():
+    """Export the full system state as a downloadable JSON file."""
+    try:
+        # Get basic state
+        state = integrated_system.get_network_state()
+        
+        # Add timestamp and extra metadata
+        export_data = {
+            "timestamp": datetime.now().isoformat(),
+            "system_state": state,
+            "version": "1.0.0",
+            # Include basic stats if available
+            "stats": {
+                "vehicles": len(sumo_manager.vehicles) if sumo_manager.running else 0,
+                "substations_online": len([s for s in integrated_system.substations.values() if s.get('operational', True)]),
+                "ev_stations_online": len([s for s in integrated_system.ev_stations.values() if s.get('operational', True)])
+            }
+        }
+        
+        # Create in-memory file
+        import io
+        import json
+        mem = io.BytesIO()
+        mem.write(json.dumps(export_data, indent=2).encode('utf-8'))
+        mem.seek(0)
+        
+        return send_file(
+            mem,
+            mimetype='application/json',
+            as_attachment=True,
+            download_name=f"manhattan_grid_state_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        )
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/network_state')
 def get_network_state():
     """Get complete network state including vehicles - OPTIMIZED FOR 1000+ VEHICLES"""
@@ -958,6 +992,12 @@ def get_network_state():
     else:
         state['vehicles'] = []
         state['vehicle_stats'] = {}
+
+        state['vehicle_stats'] = {}
+
+    # Add V2G Data if initialized
+    if 'v2g_manager' in globals() and v2g_manager:
+        state['v2g'] = v2g_manager.get_v2g_dashboard_data()
 
     return jsonify(state)
 
@@ -1434,10 +1474,107 @@ def restore_ev_station(station_id):
     return jsonify({
         'success': success,
         'station_id': station_id,
-        'station_name': station_name,
-        'message': f'Station {station_name} restored successfully'
+        'station_name': station_name
     })
 
+def _collect_comprehensive_state() -> dict:
+    """Collect a rich system state dict used by both snapshot and report APIs."""
+    state = integrated_system.get_network_state()
+
+    # Vehicle stats
+    if system_state.get('sumo_running') and sumo_manager and sumo_manager.running:
+        state['vehicle_stats'] = sumo_manager.get_statistics()
+    else:
+        state['vehicle_stats'] = {}
+
+    # V2G data
+    if 'v2g_manager' in globals() and v2g_manager:
+        state['v2g'] = v2g_manager.get_v2g_dashboard_data()
+    else:
+        state['v2g'] = {}
+
+    # Scenario controller data
+    if scenario_controller:
+        sc_status = scenario_controller.get_system_status()
+        state['scenario'] = sc_status
+    else:
+        state['scenario'] = {}
+
+    state['sumo_running'] = system_state.get('sumo_running', False)
+
+    # Compute derived KPIs
+    stats = state.get('statistics', {})
+    subs = state.get('substations', [])
+    v2g_data = state.get('v2g', {})
+    v_stats = state.get('vehicle_stats', {})
+
+    total_capacity = sum(s.get('capacity_mva', 0) for s in subs)
+    total_load = stats.get('total_load_mw', state.get('total_load_mw', 0))
+    op_subs = sum(1 for s in subs if s.get('operational'))
+    total_subs = len(subs)
+    total_vehicles = v_stats.get('active_vehicles', v_stats.get('total_vehicles', 0))
+    ev_count = v_stats.get('ev_vehicles', 0)
+
+    state['kpis'] = {
+        'capacity_utilization_pct': round(total_load / total_capacity * 100, 1) if total_capacity else 0,
+        'grid_health_pct': round(op_subs / total_subs * 100, 1) if total_subs else 100,
+        'ev_adoption_pct': round(ev_count / total_vehicles * 100, 1) if total_vehicles else 0,
+        'v2g_participation_pct': round((v2g_data.get('active_sessions_count', 0)) / max(ev_count, 1) * 100, 1) if ev_count else 0,
+        'avg_substation_load_pct': round(total_load / total_capacity * 100, 1) if total_capacity else 0,
+        'cable_integrity_pct': round(
+            (stats.get('operational_primary_cables', 0) + stats.get('operational_secondary_cables', 0)) /
+            max(stats.get('total_primary_cables', 0) + stats.get('total_secondary_cables', 0), 1) * 100, 1
+        ),
+        'vehicles_charging_pct': round((v_stats.get('vehicles_charging', 0)) / max(total_vehicles, 1) * 100, 1) if total_vehicles else 0,
+    }
+
+    return state
+
+
+@app.route('/api/snapshot/state')
+def snapshot_state():
+    """Return comprehensive system state as JSON (server-side snapshot)."""
+    try:
+        state = _collect_comprehensive_state()
+        state['meta'] = {
+            'snapshot_id': f"SNAP-{int(datetime.now().timestamp() * 1000)}",
+            'timestamp': datetime.now().isoformat(),
+            'generated_by': 'Manhattan Grid Control — Server'
+        }
+        return jsonify(state)
+    except Exception as e:
+        print(f"Snapshot state failed: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/report/generate', methods=['POST'])
+def generate_report():
+    """Generate a comprehensive system status report PDF with optional AI analysis."""
+    try:
+        data = request.json or {}
+        notes = data.get('notes', None)
+        screenshot_b64 = data.get('screenshot_base64', None)
+
+        state = _collect_comprehensive_state()
+
+        from report_generator import ReportGenerator
+        generator = ReportGenerator()
+        report_url = generator.generate_status_report(
+            state,
+            notes=notes,
+            screenshot_base64=screenshot_b64
+        )
+
+        return jsonify({
+            'success': True,
+            'url': report_url,
+            'message': 'Report generated successfully'
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"Report generation failed: {e}")
+        return jsonify({'success': False, 'message': str(e)}), 500
 @app.route('/api/restore_all', methods=['POST'])
 def restore_all():
     """Restore all substations"""
@@ -1689,14 +1826,14 @@ def v2g_status():
                 'base_load_mw': base_power_need_mw,
                 'v2g_providing_mw': active_v2g_power_mw,
                 'remaining_need_mw': remaining_power_need_mw,
-                'vehicles_discharging': sum(1 for v in v2g_data['active_vehicles'] if v['substation'] == substation_name),
+                'vehicles_discharging': sum(1 for v in v2g_data['active_sessions'] if v['substation'] == substation_name),
                 'restoration_progress': (v2g_data.get('energy_delivered', {}).get(substation_name, 0) /
                                        max(v2g_data.get('energy_required', {}).get(substation_name, 1), 1)) * 100
             }
 
     # Add system-wide real-time metrics
     v2g_data['system_metrics'] = {
-        'total_v2g_power_mw': v2g_data['active_sessions'] * 0.25,  # 250kW per vehicle
+        'total_v2g_power_mw': len(v2g_data['active_sessions']) * 0.25,  # 250kW per vehicle
         'total_substations_needing_power': len(v2g_data['enabled_substations']),
         'total_power_deficit_mw': sum(
             integrated_system.substations[s]['load_mw']
@@ -1705,14 +1842,14 @@ def v2g_status():
         ),
         'effective_power_deficit_mw': sum(
             max(0, integrated_system.substations[s]['load_mw'] -
-                sum(0.25 for v in v2g_data['active_vehicles'] if v['substation'] == s))
+                sum(0.25 for v in v2g_data['active_sessions'] if v['substation'] == s))
             for s in v2g_data['enabled_substations']
             if s in integrated_system.substations
         )
     }
 
     # Log for debugging
-    if v2g_data['active_sessions'] > 0:
+    if len(v2g_data.get('active_sessions', [])) > 0:
         print(f"[V2G STATUS] Active sessions: {v2g_data['active_sessions']}")
         print(f"[V2G STATUS] Total V2G power: {v2g_data['system_metrics']['total_v2g_power_mw']:.2f} MW")
         print(f"[V2G STATUS] Power deficit: {v2g_data['system_metrics']['total_power_deficit_mw']:.2f} MW -> "
@@ -2188,6 +2325,8 @@ def ai_map_focus_status():
             })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
 
 # ============================================================================
 # HTML TEMPLATE LOADER & INITIALIZATION

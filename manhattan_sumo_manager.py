@@ -1152,9 +1152,8 @@ class ManhattanSUMOManager:
                 except:
                     pass
         
-        if len(edge_pool) >= 2:
-            return [edge_pool[0], edge_pool[1]]
-        
+        # CRITICAL FIX: Do not return [origin, destination] if not connected
+        # If we can't find a confirmed route, return empty list to try again next time
         return []
     
     def _route_to_charging_station(self, vehicle):
@@ -1186,10 +1185,15 @@ class ManhattanSUMOManager:
             
             if best_station:
                 ev_id, station = best_station
-                traci.vehicle.changeTarget(vehicle.id, station['edge'])
-                vehicle.destination = station['edge']
-                vehicle.assigned_ev_station = ev_id
-                print(f"Vehicle {vehicle.id} routing to charging station {ev_id}")
+                try:
+                    traci.vehicle.changeTarget(vehicle.id, station['edge'])
+                    vehicle.destination = station['edge']
+                    vehicle.assigned_ev_station = ev_id
+                    print(f"Vehicle {vehicle.id} routing to charging station {ev_id}")
+                except Exception as e:
+                    print(f"Failed to route {vehicle.id} to {ev_id}: {e}")
+                    # Clear assignment on failure
+                    vehicle.assigned_ev_station = None
         
         except Exception as e:
             pass
@@ -1685,7 +1689,7 @@ class ManhattanSUMOManager:
         except:
             pass
         
-        return [current_edge, destination] if destination != current_edge else []
+        return []
 
 
     def _create_route_extension(self, last_edge: str) -> List[str]:
@@ -1699,8 +1703,29 @@ class ManhattanSUMOManager:
         if not all_edges:
             return []
         
-        # Add 3-5 random edges
-        extension = random.sample(all_edges, min(5, len(all_edges)))
+        if not all_edges:
+            return []
+        
+        # Build a connected path extension
+        extension = []
+        current = last_edge
+        
+        # Try to find 3-5 connected segments
+        for _ in range(3):
+            try:
+                # Pick a random target
+                target = random.choice(all_edges)
+                route = traci.simulation.findRoute(current, target)
+                
+                if route and route.edges:
+                    # Add edges (skip first as it connects to previous)
+                    new_edges = route.edges[1:] if route.edges[0] == current else route.edges
+                    if new_edges:
+                        extension.extend(new_edges)
+                        current = new_edges[-1]
+            except:
+                continue
+                
         return extension
     def _create_circle_route_around_station(self, veh_id, station_edge):
         """Create a circular route around a charging station for vehicles waiting to charge

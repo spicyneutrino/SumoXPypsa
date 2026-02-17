@@ -148,6 +148,239 @@
             }
         }
 
+        // Snapshot function - Comprehensive System State Capture
+        window.buildSnapshotData = function() {
+            const ns = window.networkState || {};
+            const stats = ns.statistics || {};
+            const vStats = ns.vehicle_stats || {};
+            const v2g = ns.v2g || {};
+            const subs = ns.substations || [];
+            const evStations = ns.ev_stations || [];
+            const cables = ns.cables || {};
+            const scenario = ns.scenario || {};
+
+            const totalCapacity = subs.reduce((s, sub) => s + (sub.capacity_mva || 0), 0);
+            const totalLoad = stats.total_load_mw || ns.total_load_mw || 0;
+            const opSubs = subs.filter(s => s.operational).length;
+            const totalSubs = subs.length;
+            const totalVehicles = vStats.active_vehicles || vStats.total_vehicles || 0;
+            const evCount = vStats.ev_vehicles || 0;
+
+            return {
+                meta: {
+                    snapshot_id: `SNAP-${Date.now()}`,
+                    timestamp: new Date().toISOString(),
+                    simulation_time: scenario.time_formatted || null,
+                    simulation_hour: scenario.time_hour,
+                    simulation_minute: scenario.time_minute,
+                    generated_by: "Manhattan Grid Control Dashboard"
+                },
+                map_view: {
+                    center: map.getCenter(),
+                    zoom: map.getZoom(),
+                    pitch: map.getPitch(),
+                    bearing: map.getBearing(),
+                    visible_layers: {
+                        traffic_lights: layers.lights,
+                        vehicles: layers.vehicles,
+                        primary_cables: layers.primary,
+                        secondary_cables: layers.secondary,
+                        ev_stations: layers.ev,
+                        substations: layers.substations
+                    }
+                },
+                grid_status: {
+                    substations: subs.map(sub => ({
+                        name: sub.name,
+                        operational: sub.operational,
+                        load_mw: sub.load_mw,
+                        capacity_mva: sub.capacity_mva,
+                        utilization_pct: sub.capacity_mva > 0 ? +(sub.load_mw / sub.capacity_mva * 100).toFixed(1) : 0,
+                        coverage_area: sub.coverage_area || null
+                    })),
+                    summary: {
+                        total_substations: totalSubs,
+                        operational: opSubs,
+                        offline: totalSubs - opSubs,
+                        total_load_mw: +totalLoad.toFixed(2),
+                        total_capacity_mva: +totalCapacity.toFixed(2),
+                        base_load_mw: +(stats.base_load_mw || 0).toFixed(2),
+                        ev_charging_load_mw: +(stats.ev_charging_load_mw || 0).toFixed(2)
+                    }
+                },
+                traffic: {
+                    sumo_running: ns.sumo_running || false,
+                    total_vehicles: totalVehicles,
+                    ev_count: evCount,
+                    gas_count: (totalVehicles - evCount) || 0,
+                    avg_speed_kmh: +((vStats.avg_speed_mps || 0) * 3.6).toFixed(1),
+                    vehicles_charging: vStats.vehicles_charging || 0,
+                    vehicles_low_battery: vStats.vehicles_low_battery || 0,
+                    vehicles_stranded: vStats.vehicles_stranded || 0,
+                    vehicles_circling: vStats.vehicles_circling || 0,
+                    total_energy_consumed_kwh: +(vStats.total_energy_consumed_kwh || 0).toFixed(1),
+                    total_distance_km: +(vStats.total_distance_km || 0).toFixed(1)
+                },
+                v2g: {
+                    active_sessions: v2g.active_sessions_count || 0,
+                    total_power_kw: +(v2g.total_power_kw || 0).toFixed(1),
+                    total_earnings_usd: +(v2g.total_earnings || 0).toFixed(2),
+                    total_kwh_provided: +(v2g.total_kwh_provided || 0).toFixed(2),
+                    earnings_rate_per_hour: +(v2g.earnings_rate_per_hour || 0).toFixed(2),
+                    peak_power_kw: +(v2g.peak_power || 0).toFixed(1),
+                    locked_vehicles: v2g.locked_vehicles || 0,
+                    pending_vehicles: v2g.pending_vehicles || 0,
+                    enabled_substations: v2g.enabled_substations || [],
+                    restored_substations: v2g.restored_substations || [],
+                    per_substation_delivery: Object.entries(v2g.energy_delivered || {}).map(([name, kwh]) => ({
+                        substation: name,
+                        delivered_kwh: +(kwh || 0).toFixed(2),
+                        required_kwh: +((v2g.energy_required || {})[name] || 0).toFixed(2)
+                    }))
+                },
+                ev_stations: evStations.map(st => ({
+                    id: st.id,
+                    name: st.name,
+                    operational: st.operational,
+                    chargers: st.chargers,
+                    vehicles_charging: st.vehicles_charging || 0,
+                    current_load_kw: +(st.current_load_kw || 0).toFixed(1),
+                    substation: st.substation
+                })),
+                cables: {
+                    primary: {
+                        total: stats.total_primary_cables || (cables.primary || []).length,
+                        operational: stats.operational_primary_cables || 0
+                    },
+                    secondary: {
+                        total: stats.total_secondary_cables || (cables.secondary || []).length,
+                        operational: stats.operational_secondary_cables || 0
+                    }
+                },
+                scenario: {
+                    temperature_f: scenario.temperature_f || null,
+                    weather: scenario.weather || null,
+                    time_description: scenario.time_description || null,
+                    auto_advance: scenario.auto_advance || false
+                },
+                kpis: {
+                    capacity_utilization_pct: totalCapacity > 0 ? +(totalLoad / totalCapacity * 100).toFixed(1) : 0,
+                    grid_health_pct: totalSubs > 0 ? +(opSubs / totalSubs * 100).toFixed(1) : 100,
+                    ev_adoption_pct: totalVehicles > 0 ? +(evCount / totalVehicles * 100).toFixed(1) : 0,
+                    v2g_participation_pct: evCount > 0 ? +((v2g.active_sessions_count || 0) / Math.max(evCount, 1) * 100).toFixed(1) : 0,
+                    avg_substation_load_pct: totalSubs > 0 && totalCapacity > 0
+                        ? +(totalLoad / totalCapacity * 100).toFixed(1) : 0,
+                    cable_integrity_pct: (() => {
+                        const tp = stats.total_primary_cables || 0;
+                        const ts = stats.total_secondary_cables || 0;
+                        const op = stats.operational_primary_cables || 0;
+                        const os = stats.operational_secondary_cables || 0;
+                        const total = tp + ts;
+                        return total > 0 ? +((op + os) / total * 100).toFixed(1) : 100;
+                    })(),
+                    vehicles_charging_pct: totalVehicles > 0 ? +((vStats.vehicles_charging || 0) / totalVehicles * 100).toFixed(1) : 0
+                }
+            };
+        };
+
+        window.captureSnapshot = function() {
+            try {
+                const mapCanvas = map.getCanvas();
+                const image = mapCanvas.toDataURL('image/png');
+                const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+                const data = window.buildSnapshotData();
+
+                // Download map image
+                const link = document.createElement('a');
+                link.download = `snapshot_map_${timestamp}.png`;
+                link.href = image;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+
+                // Download comprehensive JSON
+                const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(data, null, 2));
+                const dataLink = document.createElement('a');
+                dataLink.setAttribute("href", dataStr);
+                dataLink.setAttribute("download", `snapshot_${timestamp}.json`);
+                document.body.appendChild(dataLink);
+                dataLink.click();
+                dataLink.remove();
+
+                showNotification('📸 Snapshot Captured', 'Map image and comprehensive state JSON downloaded.', 'success');
+
+            } catch (e) {
+                console.error("Snapshot failed:", e);
+                showNotification('❌ Snapshot Failed', 'Could not capture screen.', 'error');
+            }
+        };
+
+        // Socket listener for remote snapshot trigger
+        if (typeof socket !== 'undefined') {
+            socket.on('trigger_snapshot', () => {
+                console.log("Remote snapshot trigger received");
+                window.captureSnapshot();
+            });
+
+            // Socket listener for report download (triggered by chatbot tool)
+            socket.on('trigger_report_download', (data) => {
+                if (data && data.url) {
+                    console.log("Report download trigger received:", data.url);
+                    const link = document.createElement('a');
+                    link.href = data.url;
+                    link.download = data.url.split('/').pop();
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                    showNotification('Report Ready', 'PDF report downloaded.', 'success');
+                }
+            });
+        }
+
+        // Generate Report Function — sends map screenshot + snapshot data to backend
+        window.generateReport = async function() {
+            try {
+                showNotification('📄 Generating Report...', 'Capturing map and compiling analytics...', 'info');
+
+                const notes = prompt("Optional: Add notes for this report (or leave empty):");
+
+                // Capture the current map as a PNG base64 string
+                let screenshotBase64 = null;
+                try {
+                    const mapCanvas = map.getCanvas();
+                    screenshotBase64 = mapCanvas.toDataURL('image/png');
+                } catch (imgErr) {
+                    console.warn("Could not capture map screenshot for report:", imgErr);
+                }
+
+                const response = await fetch('/api/report/generate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        notes: notes || "",
+                        screenshot_base64: screenshotBase64
+                    })
+                });
+
+                const data = await response.json();
+
+                if (data.success && data.url) {
+                    const link = document.createElement('a');
+                    link.href = data.url;
+                    link.download = data.url.split('/').pop();
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                    showNotification('✅ Report Ready', 'PDF report downloaded successfully.', 'success');
+                } else {
+                    showNotification('❌ Report Failed', data.message || 'Unknown error', 'error');
+                }
+            } catch (e) {
+                console.error("Report generation failed:", e);
+                showNotification('❌ Error', 'Could not contact reporting server.', 'error');
+            }
+        };
+
         async function runV2GRescueScenario() {
             try {
                 const substation = 'Times Square';
@@ -328,7 +561,7 @@
         pitch: 60,           // 3D perspective - tilt camera 60 degrees
         bearing: -17.6,      // Rotate for better Manhattan view
         antialias: true,
-        preserveDrawingBuffer: PERFORMANCE_CONFIG.enableDebugMode,
+        preserveDrawingBuffer: true, // REQUIRED for screenshot capability
         refreshExpiredTiles: false,
         fadeDuration: 0,
         maxZoom: 20,
@@ -354,6 +587,13 @@
         // **LOAD NETWORK STATE FIRST TO CREATE LAYERS WITH DATA**
         await loadNetworkState();
         console.log('✅ Network state loaded on map init');
+
+        // Safety: re-fetch after a brief delay to catch any layers that weren't
+        // ready on the first call (3D terrain + EV layer init can race)
+        setTimeout(async () => {
+            await loadNetworkState();
+            console.log('✅ Network state refreshed (safety reload)');
+        }, 2000);
 
         // ==========================================
         // 3D TERRAIN AND BUILDINGS
@@ -1219,7 +1459,7 @@ interpolate(deltaTime) {
     let layers = {
         lights: true,
         vehicles: true,
-        primary: false,
+        primary: true,
         secondary: false,
         ev: true,
         substations: true
@@ -1615,6 +1855,13 @@ interpolate(deltaTime) {
         requestAnimationFrame(() => {
             const stats = networkState.statistics;
             
+            // DEBUG: Log substation counts
+            if (stats.operational_substations === 8 && stats.total_substations === 8) {
+                 console.warn("Substations show 8/8 but failure might be active:", networkState);
+            } else {
+                 console.log(`Substations: ${stats.operational_substations}/${stats.total_substations}`);
+            }
+
             const updates = {
                 'traffic-lights': stats.total_traffic_lights,
                 'powered-lights': stats.powered_traffic_lights,
@@ -2212,6 +2459,18 @@ function initializeEVStationLayer() {
                                 <div><span style="color: var(--text-muted);">Capacity:</span> ${props.chargers} chargers</div>
                                 <div><span style="color: var(--text-muted);">Substation:</span> ${props.substation}</div>
                             </div>
+                            <button onclick="window.askAboutComponent('${props.name}', 'ev_station')" style="
+                                margin-top: 12px;
+                                width: 100%;
+                                background: linear-gradient(135deg, #00aaff, #0077cc);
+                                border: none;
+                                border-radius: 6px;
+                                color: white;
+                                padding: 8px;
+                                cursor: pointer;
+                                font-weight: 600;
+                                transition: opacity 0.2s;
+                            " onmouseover="this.style.opacity=0.9" onmouseout="this.style.opacity=1">💬 Ask AI Assistant</button>
                         </div>
                     `)
                     .addTo(map);
@@ -2400,6 +2659,18 @@ function initializeEVStationLayer() {
                                         <div><span style="color: var(--text-muted);">Status:</span> <span style="color: ${statusColor}; font-weight: 600;">${statusText}</span></div>
                                         <div><span style="color: var(--text-muted);">Coverage:</span> ${p.coverage_area}</div>
                                     </div>
+                                    <button onclick="window.askAboutComponent('${p.name}', 'substation')" style="
+                                        margin-top: 12px;
+                                        width: 100%;
+                                        background: linear-gradient(135deg, #00aaff, #0077cc);
+                                        border: none;
+                                        border-radius: 6px;
+                                        color: white;
+                                        padding: 8px;
+                                        cursor: pointer;
+                                        font-weight: 600;
+                                        transition: opacity 0.2s;
+                                    " onmouseover="this.style.opacity=0.9" onmouseout="this.style.opacity=1">💬 Ask AI Assistant</button>
                                 </div>
                             `)
                             .addTo(map);
@@ -2437,7 +2708,7 @@ function initializeEVStationLayer() {
                         type: 'line',
                         source: 'primary-cables',
                         layout: {
-                            'visibility': 'none'  // Hidden by default
+                            'visibility': layers.primary ? 'visible' : 'none'
                         },
                         paint: {
                             'line-color': ['case', ['get', 'operational'], '#00ff88', '#ff3366'],
@@ -2451,7 +2722,7 @@ function initializeEVStationLayer() {
                         type: 'line',
                         source: 'primary-cables',
                         layout: {
-                            'visibility': 'none'  // Hidden by default
+                            'visibility': layers.primary ? 'visible' : 'none'
                         },
                         paint: {
                             'line-color': ['case', ['get', 'operational'], '#00ffcc', '#ff3b3b'],
@@ -2481,7 +2752,7 @@ function initializeEVStationLayer() {
                         type: 'line',
                         source: 'secondary-cables',
                         layout: {
-                            'visibility': 'none'  // Hidden by default
+                            'visibility': layers.secondary ? 'visible' : 'none'
                         },
                         paint: {
                             'line-color': '#ffcc66',
@@ -2495,7 +2766,7 @@ function initializeEVStationLayer() {
                         type: 'line',
                         source: 'secondary-cables',
                         layout: {
-                            'visibility': 'none'  // Hidden by default
+                            'visibility': layers.secondary ? 'visible' : 'none'
                         },
                         paint: {
                             'line-color': '#ffbb44',
@@ -2984,6 +3255,7 @@ function initializeEVStationLayer() {
         // Handle V2G data from system_update event
         if (state.v2g) {
             updateV2GFromWebSocket(state.v2g);
+            updateV2GDashboard(state.v2g);
         }
         
         // Handle AI focus from system_update event
@@ -3126,9 +3398,17 @@ function initializeEVStationLayer() {
         if (!focusData || !map) return;
         
         // Apply map focus (fly to location, highlight, etc.)
-        if (focusData.coordinates) {
+        // Apply map focus (fly to location, highlight, etc.)
+        let center = null;
+        if (Array.isArray(focusData.coordinates) && focusData.coordinates.length === 2) {
+            center = focusData.coordinates;
+        } else if (focusData.coordinates && focusData.coordinates.lat && focusData.coordinates.lon) {
+            center = [focusData.coordinates.lon, focusData.coordinates.lat];
+        }
+
+        if (center) {
             map.flyTo({
-                center: [focusData.coordinates.lon, focusData.coordinates.lat],
+                center: center,
                 zoom: focusData.zoom || 14,
                 duration: 2000
             });
@@ -3160,6 +3440,56 @@ function initializeEVStationLayer() {
 
     // Removed periodic setInterval polling - now using WebSockets 🚀
 
+    function controlLayers(layerList, message) {
+        if (!layerList || !Array.isArray(layerList)) {
+            console.error('Invalid layer list for controlLayers');
+            return;
+        }
+        
+        console.log('Controlling layers:', layerList);
+        
+        // Define expected state (true = visible) based on typical usage
+        // Or simplified: just ensure they are visible? 
+        // Usage in executeMapAction suggests it might be a list of layers to SHOW.
+        
+        layerList.forEach(layer => {
+            // Check current state. If we want to SHOW it and it's hidden, toggle it.
+            // But toggleLayer just flips it. 
+            // We need 'setLayerVisibility' really, but toggleLayer is what we have.
+            // Let's assume controlLayers implies SHOWING them?
+            // Or maybe checking the current state?
+            
+            // Actually, let's implement a smarter setLayer method if possible, 
+            // or just use toggleLayer if we lack direct set capability.
+            // script.js uses `layers[layer] = !layers[layer]`.
+            
+            // To be safe, let's look at `layers` object state.
+            if (!layers[layer]) {
+                 toggleLayer(layer);
+            }
+        });
+
+        if (message) {
+            showNotification('Layer Update', message, 'info');
+        }
+    }
+
+    function showPowerGrid() {
+        const gridLayers = ['primary', 'secondary', 'substations'];
+        gridLayers.forEach(layer => {
+            if (!layers[layer]) toggleLayer(layer);
+        });
+        showNotification('⚡ Power Grid', 'Power grid layers enabled', 'success');
+    }
+
+    function hidePowerGrid() {
+        const gridLayers = ['primary', 'secondary'];
+        gridLayers.forEach(layer => {
+            if (layers[layer]) toggleLayer(layer);
+        });
+        showNotification('⚡ Power Grid', 'Power grid layers hidden', 'info');
+    }
+
     function toggleLayer(layer) {
         layers[layer] = !layers[layer];
         
@@ -3184,86 +3514,50 @@ function initializeEVStationLayer() {
         }
     }
 
-    // Track simulation time with local seconds counter
-    // Track simulation time with local seconds counter
-    const now = new Date();
-    let displayHours = now.getHours();
-    let displayMinutes = now.getMinutes();
-    let displaySeconds = now.getSeconds();
-    let timeInitialized = false;
+    // =========================================================================
+    // SIMULATION CLOCK — Single source of truth
+    // The backend (ScenarioController) owns the time and broadcasts it every
+    // second via the 'system_update' WebSocket event.  The frontend ONLY
+    // renders whatever the backend says — no independent counter.
+    // Initialize from system clock to avoid a blank flash before the first
+    // WebSocket update arrives (~1 s).
+    // =========================================================================
+    const _initNow = new Date();
+    let displayHours = _initNow.getHours();
+    let displayMinutes = _initNow.getMinutes();
+    let displaySeconds = _initNow.getSeconds();
 
-    function updateTime() {
+    function renderTime() {
         const timeEl = document.getElementById('time');
         if (!timeEl) return;
-
-        // NEW: Allow external updates (e.g., from scenario-controls.js) to override checks
-        if (!timeInitialized) {
-            fetch('/api/scenario/status')
-
-
-        // Increment seconds every call (called every 1 second)
-        displaySeconds++;
+        const ampm = displayHours >= 12 ? 'PM' : 'AM';
+        const hours12 = displayHours % 12 || 12;
+        timeEl.textContent = `${String(hours12).padStart(2, '0')}:${String(displayMinutes).padStart(2, '0')}:${String(displaySeconds).padStart(2, '0')} ${ampm}`;
     }
 
-    // EXPOSED: Function for scenario-controls.js to force update time
+    // Called by scenario-controls.js handleSystemUpdate (every ~1s via WebSocket)
     window.updateLocalTime = function(hours, minutes, seconds = 0) {
         displayHours = parseInt(hours);
         displayMinutes = parseInt(minutes);
         displaySeconds = parseInt(seconds);
-        timeInitialized = true; // Ensure logic runs
-        
-        // Immediate update to UI to prevent flicker
-        const timeEl = document.getElementById('time');
-        if (timeEl) {
-            const ampm = displayHours >= 12 ? 'PM' : 'AM';
-            const hours12 = displayHours % 12 || 12;
-            const secsStr = String(displaySeconds).padStart(2, '0');
-            timeEl.textContent = `${String(hours12).padStart(2, '0')}:${String(displayMinutes).padStart(2, '0')}:${secsStr} ${ampm}`;
-        }
+        renderTime();
     };
 
-        // Increment seconds every call (called every 1 second)
-        displaySeconds++;
-        if (displaySeconds >= 60) {
-            displaySeconds = 0;
-            displayMinutes++;
-            if (displayMinutes >= 60) {
-                displayMinutes = 0;
-                displayHours++;
-                if (displayHours >= 24) {
-                    displayHours = 0;
-                }
-            }
-        }
-
-        // Convert to 12-hour format with AM/PM
-        const ampm = displayHours >= 12 ? 'PM' : 'AM';
-        const hours12 = displayHours % 12 || 12;
-
-        timeEl.textContent = `${String(hours12).padStart(2, '0')}:${String(displayMinutes).padStart(2, '0')}:${String(displaySeconds).padStart(2, '0')} ${ampm}`;
-    }
-
-    // Expose updateTime globally for scenario handlers
-    window.updateTime = updateTime;
-
-    // Global debounce: any time setter (chatbot, slider) can set this to suppress auto-advance
-    window._lastManualTimeUpdate = 0;
-
-    // Allow external code to sync the local clock (e.g. scenario slider, chatbot)
+    // Called by scenario-controls.js setTime / slider (user-initiated change)
     window.syncDisplayTime = function(hour, minute) {
         displayHours = Math.floor(hour);
         displayMinutes = minute !== undefined ? minute : Math.round((hour % 1) * 60);
         displaySeconds = 0;
-        timeInitialized = true;
         window._lastManualTimeUpdate = Date.now();
-        // Immediately update the footer
-        const timeEl = document.getElementById('time');
-        if (timeEl) {
-            const ampm = displayHours >= 12 ? 'PM' : 'AM';
-            const hours12 = displayHours % 12 || 12;
-            timeEl.textContent = `${String(hours12).padStart(2, '0')}:${String(displayMinutes).padStart(2, '0')}:00 ${ampm}`;
-        }
+        renderTime();
     };
+
+    // Kept for backward-compat — just re-renders current values (no counter)
+    function updateTime() { renderTime(); }
+    window.updateTime = updateTime;
+
+    // Global debounce: any time setter (chatbot, slider) can set this to suppress auto-advance
+    window._lastManualTimeUpdate = 0;
 
     // Sync local clock when chatbot changes time via socket
     if (window.socket) {
@@ -3272,14 +3566,8 @@ function initializeEVStationLayer() {
                 displayHours = Math.floor(data.hour);
                 displayMinutes = data.minute || Math.round((data.hour % 1) * 60);
                 displaySeconds = 0;
-                timeInitialized = true;
-                // Immediately update the footer
-                const timeEl = document.getElementById('time');
-                if (timeEl) {
-                    const ampm = displayHours >= 12 ? 'PM' : 'AM';
-                    const hours12 = displayHours % 12 || 12;
-                    timeEl.textContent = `${String(hours12).padStart(2, '0')}:${String(displayMinutes).padStart(2, '0')}:${String(displaySeconds).padStart(2, '0')} ${ampm}`;
-                }
+                window._lastManualTimeUpdate = Date.now();
+                renderTime();
             }
         });
         window.socket.on('scenario_temp_update', (data) => {
@@ -3315,29 +3603,46 @@ function initializeEVStationLayer() {
             warning: 'linear-gradient(135deg, #ffaa00, #ff8800)'
         };
         
+        let container = document.getElementById('notification-container');
+        if (!container) {
+            container = document.createElement('div');
+            container.id = 'notification-container';
+            container.style.cssText = `
+                position: fixed;
+                top: 24px;
+                right: 24px;
+                display: flex;
+                flex-direction: column;
+                gap: 10px;
+                z-index: 10000;
+                pointer-events: none;
+            `;
+            document.body.appendChild(container);
+        }
+
         const notification = document.createElement('div');
         notification.style.cssText = `
-            position: fixed;
-            top: 24px;
-            right: 24px;
             background: ${colors[type]};
             color: rgba(0, 0, 0, 0.9);
             padding: 16px 20px;
             border-radius: 12px;
             box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-            z-index: 10000;
             max-width: 320px;
             animation: slideInRight 0.3s ease;
             font-weight: 500;
+            pointer-events: auto;
+            position: relative;
         `;
         notification.innerHTML = `<strong>${title}</strong><br>${message}`;
-        document.body.appendChild(notification);
+        container.appendChild(notification);
         
         setTimeout(() => {
             notification.style.animation = 'slideOutRight 0.3s ease';
             setTimeout(() => notification.remove(), 300);
-        }, 3000);
+        }, 4000);
     }
+
+
 // ==========================================
     // ML DASHBOARD FUNCTIONS
     // ==========================================
@@ -3520,8 +3825,58 @@ function initializeEVStationLayer() {
     }
 
     // ==========================================
+    // SOCKET.IO EVENT LISTENERS
+    // ==========================================
+    
+    // Existing listeners...
+    
+    if (window.socket) {
+        window.socket.on('v2g_update', (data) => {
+            console.log('🔋 V2G Update:', data);
+            if (data.action === 'v2g_enabled') {
+                showNotification('🔋 V2G Activated', `Vehicle-to-Grid enabled for ${data.substation}`, 'success');
+            } else if (data.action === 'v2g_disabled') {
+                showNotification('🔌 V2G Disabled', `Vehicle-to-Grid disabled for ${data.substation}`, 'info');
+            }
+            if (typeof refreshV2GDashboard === 'function') refreshV2GDashboard();
+        });
+    }
+
+    // ==========================================
     // CHATBOT FUNCTIONS
     // ==========================================
+    
+    // NEW: Click-to-Query Logic
+    window.askAboutComponent = function(name, type) {
+        const chatWin = document.getElementById('chatbot-window');
+        const launcher = document.getElementById('chatbot-launcher');
+        const input = document.getElementById('chat-input');
+        
+        // Ensure chat window is open
+        if (chatWin && (chatWin.style.display === 'none' || !chatWin.style.display)) {
+            if (typeof toggleChatbot === 'function') {
+                toggleChatbot();
+            } else {
+                chatWin.style.display = 'flex';
+                if (launcher) launcher.style.display = 'none';
+            }
+        } else if (chatWin && chatWin.style.display !== 'flex') {
+             // Fallback if style is set to something weird or empty
+             chatWin.style.display = 'flex';
+             if (launcher) launcher.style.display = 'none';
+        }
+        
+        // Set input value
+        if (input) {
+            input.value = `Status of ${name}`;
+            input.focus();
+            
+            // Optional: Auto-scroll to bottom of chat
+            const chatBody = document.getElementById('chat-body');
+            if (chatBody) chatBody.scrollTop = chatBody.scrollHeight;
+        }
+    };
+
     function toggleChatbot() {
         const launcher = document.getElementById('chatbot-launcher');
         const win = document.getElementById('chatbot-window');
@@ -3593,12 +3948,19 @@ function initializeEVStationLayer() {
 
     async function executeMapAction(mapAction) {
         console.log('executeMapAction called with:', mapAction);
-        console.log('window.map exists:', !!window.map);
-        console.log('window.mapLoaded:', window.mapLoaded);
-
+        
         if (!mapAction) {
             console.error('No map action provided');
             return;
+        }
+
+        // Normalize coordinates (handle coords vs coordinates)
+        if (mapAction.coords && !mapAction.coordinates) {
+            mapAction.coordinates = mapAction.coords;
+        }
+        // Handle single dict coord vs array
+        if (mapAction.coordinates && !Array.isArray(mapAction.coordinates) && mapAction.coordinates.lat) {
+            mapAction.coordinates = [mapAction.coordinates.lon, mapAction.coordinates.lat];
         }
 
         if (!window.map) {
@@ -3623,13 +3985,15 @@ function initializeEVStationLayer() {
             switch (mapAction.type) {
                 case 'zoom_to_location':
                 case 'focus_and_highlight':
-                    console.log('Processing focus_and_highlight action:', mapAction);
+                case 'highlight_location':  // Added support for new tool
+                    console.log('Processing map highlight action:', mapAction);
 
                     if (mapAction.coordinates && mapAction.coordinates.length === 2) {
                         console.log('Flying to coordinates:', mapAction.coordinates);
 
                         // CRITICAL: Reload network state to update map with restored substation
-                        await loadNetworkState();
+                        // Only if needed (restoration implied?)
+                        if (mapAction.type === 'highlight_restore') await loadNetworkState();
 
                         // Clear previous highlights
                         clearAllHighlights();
@@ -3639,13 +4003,11 @@ function initializeEVStationLayer() {
                             window.map.flyTo({
                                 center: mapAction.coordinates,
                                 zoom: mapAction.zoom || 16,
+                                pitch: mapAction.pitch || 45,
                                 duration: 1500,
                                 essential: true,
-                                easing(t) {
-                                    return t * (2 - t); // easeOutQuad
-                                }
+                                easing(t) { return t * (2 - t); }
                             });
-                            console.log('Map flyTo executed successfully');
                         } catch (flyError) {
                             console.error('Map flyTo error:', flyError);
                             showNotification('❌ Map Error', 'Could not focus on location', 'error');
@@ -3654,7 +4016,6 @@ function initializeEVStationLayer() {
 
                         // Add advanced highlight with delay
                         setTimeout(() => {
-                            console.log('Creating advanced highlight...');
                             createAdvancedHighlight({
                                 coordinates: mapAction.coordinates,
                                 name: mapAction.name || mapAction.location || 'Location',
@@ -3666,11 +4027,11 @@ function initializeEVStationLayer() {
                         }, 800);
 
                         // Show success notification
-                        showNotification('🗺️ Location Found', `Showing ${mapAction.name || mapAction.location || 'location'} on map`, 'success');
-                        console.log('Map action executed successfully');
+                        const locName = mapAction.name || mapAction.location || 'location';
+                        showNotification('🗺️ Location Found', `Showing ${locName} on map`, 'success');
                     } else {
                         console.error('Invalid coordinates:', mapAction.coordinates);
-                        showNotification('❌ Map Error', 'Invalid location coordinates', 'error');
+                        showNotification('❌ Map Error', `Invalid coordinates for ${mapAction.location || 'location'}`, 'error');
                     }
                     break;
 
@@ -3679,9 +4040,42 @@ function initializeEVStationLayer() {
                 case 'highlight_restore':
                     if (mapAction.substation_id || mapAction.location || mapAction.name) {
                         const locationName = mapAction.location || mapAction.name || mapAction.substation_id;
-                        console.log('Highlighting substation:', locationName, mapAction.coordinates || mapAction.coords);
-                        highlightSubstationAdvanced(locationName, mapAction.coordinates || mapAction.coords);
-                        showNotification('🏭 Substation Highlighted', `Showing ${locationName} on map`, 'info');
+                        console.log('Highlighting substation:', locationName, mapAction.coordinates);
+                        
+                        // Fly to location if coordinates are provided
+                        // Fly to location if coordinates are provided
+                        let center = null;
+                        if (Array.isArray(mapAction.coordinates) && mapAction.coordinates.length === 2) {
+                            center = mapAction.coordinates;
+                        } else if (mapAction.coordinates && mapAction.coordinates.lat && mapAction.coordinates.lon) {
+                            center = [mapAction.coordinates.lon, mapAction.coordinates.lat];
+                        }
+
+                        if (center) {
+                             window.map.flyTo({
+                                center: center,
+                                zoom: mapAction.zoom || 15,
+                                pitch: mapAction.pitch || 45,
+                                duration: 1500,
+                                essential: true
+                            });
+                        }
+                        
+                        // Use advanced highlighter
+                        if (center) {
+                            highlightSubstationAdvanced(locationName, center);
+                        } else {
+                            highlightSubstationAdvanced(locationName, mapAction.coordinates);
+                        }
+                        
+                        // Specific notification per type
+                        if (mapAction.type === 'highlight_failure') {
+                             showNotification('⚠️ Substation Failure', `${locationName} is OFFLINE`, 'error');
+                        } else if (mapAction.type === 'highlight_restore') {
+                             showNotification('✅ Substation Restored', `${locationName} is back ONLINE`, 'success');
+                        } else {
+                             showNotification('🏭 Substation Highlighted', `Showing ${locationName}`, 'info');
+                        }
                     }
                     break;
 
@@ -3724,7 +4118,6 @@ function initializeEVStationLayer() {
                     break;
 
                 case 'show_substation_network':
-                    console.log('🔌 Showing individual substation network:', mapAction);
                     if (mapAction.substation_name) {
                         showSubstationNetwork(mapAction.substation_name, {
                             showCables: mapAction.show_cables || true,
@@ -3734,61 +4127,51 @@ function initializeEVStationLayer() {
                     break;
 
                 case 'show_ev_charging':
-                    console.log('⚡ Showing EV charging station for substation:', mapAction);
                     if (mapAction.substation && mapAction.coordinates) {
-                        // Enable EV layer if not already enabled
                         const evToggle = document.getElementById('layer-ev');
                         if (evToggle && !evToggle.checked) {
                             evToggle.checked = true;
                             toggleLayer('ev');
                         }
-
-                        // Fly to the substation location
                         window.map.flyTo({
                             center: mapAction.coordinates,
                             zoom: mapAction.zoom || 16,
                             duration: 1500,
-                            essential: true,
-                            easing(t) {
-                                return t * (2 - t); // easeOutQuad
-                            }
+                            essential: true
                         });
-
-                        // Highlight the EV station and substation
                         setTimeout(() => {
                             highlightEVStations(mapAction.substation);
                             createAdvancedHighlight({
                                 coordinates: mapAction.coordinates,
-                                name: `${mapAction.substation} - EV Charging Station`,
+                                name: `${mapAction.substation} - EV Charging`,
                                 type: 'ev_station',
                                 duration: 15000,
-                                pulseColor: '#00ffff',
-                                showConnections: true
+                                pulseColor: '#00ffff'
                             });
                         }, 800);
-
                         showNotification('⚡ EV Charging Station', `Showing EV station for ${mapAction.substation}`, 'success');
                     }
                     break;
 
                 case 'control_layers':
-                    console.log('🎛️ Controlling layers:', mapAction);
                     if (mapAction.layers && Array.isArray(mapAction.layers)) {
                         controlLayers(mapAction.layers, mapAction.message || '');
                     }
                     break;
 
                 case 'focus_location':
-                    if (mapAction.coords) {
+                     // Already handled by normalization logic + general flyTo above?
+                     // But if it slips through:
+                    if (mapAction.coordinates) {
                         window.map.flyTo({
-                            center: mapAction.coords,
+                            center: mapAction.coordinates,
                             zoom: mapAction.zoom || 16,
                             duration: 2000,
                             essential: true
                         });
-                        setTimeout(() => {
+                         setTimeout(() => {
                             createAdvancedHighlight({
-                                coordinates: mapAction.coords,
+                                coordinates: mapAction.coordinates,
                                 name: mapAction.name || 'Location',
                                 type: 'destination',
                                 duration: 20000,
@@ -3801,69 +4184,61 @@ function initializeEVStationLayer() {
 
                 case 'show_all_vehicles':
                     highlightAllVehicles(mapAction);
-                    showNotification('🚗 Vehicle Display', 'All vehicles highlighted with tracking', 'info');
+                    showNotification('🚗 Vehicle Display', 'All vehicles highlighted', 'info');
                     break;
 
                 case 'visualize_grid':
                     visualizePowerGrid(mapAction);
-                    showNotification('⚡ Grid Visualization', 'Power grid network displayed', 'info');
+                    showNotification('⚡ Grid Visualization', 'Power grid displayed', 'info');
                     break;
 
                 case 'show_heatmap':
                     showHeatmapOverlay(mapAction);
-                    showNotification('🌡️ Heatmap Active', (mapAction.data_type || 'Data') + ' heatmap overlay enabled', 'info');
+                    showNotification('🌡️ Heatmap Active', 'Heatmap overlay enabled', 'info');
                     break;
 
                 case 'zoom_change':
-                    // Handle zoom in/out commands
                     const currentZoom = window.map.getZoom();
                     const newZoom = currentZoom + (mapAction.delta || 0);
                     window.map.easeTo({
                         zoom: newZoom,
                         duration: 800,
-                        easing(t) {
-                            return t * (2 - t); // easeOutQuad
-                        }
+                        easing(t) { return t * (2 - t); }
                     });
-                    const direction = mapAction.delta > 0 ? 'in' : 'out';
-                    showNotification('🔍 Zoom', `Zooming ${direction} to level ${newZoom.toFixed(1)}`, 'info');
                     break;
 
                 case 'set_zoom':
-                    // Set specific zoom level
                     window.map.easeTo({
                         zoom: mapAction.level || 12,
                         duration: 1000,
-                        easing(t) {
-                            return t * (2 - t);
-                        }
+                        easing(t) { return t * (2 - t); }
                     });
-                    showNotification('🔍 Zoom', `Zoom level set to ${mapAction.level || 12}`, 'info');
                     break;
 
                 case 'set_camera':
-                    // Set camera pitch and bearing
                     window.map.easeTo({
                         pitch: mapAction.pitch !== undefined ? mapAction.pitch : window.map.getPitch(),
                         bearing: mapAction.bearing !== undefined ? mapAction.bearing : window.map.getBearing(),
                         zoom: mapAction.zoom !== undefined ? mapAction.zoom : window.map.getZoom(),
-                        duration: 1500,
-                        easing(t) {
-                            return t * (2 - t);
-                        }
+                        duration: 1500
                     });
-                    showNotification('📷 Camera', 'Camera view adjusted', 'info');
                     break;
-            }
 
-            // Enhanced notification system
-            if (mapAction.message && !mapAction.type.includes('highlight')) {
-                showNotification(`🗺️ Map Action`, mapAction.message, 'info');
+                case 'set_map_view':
+                    const pitch2d = mapAction.mode === '2d' ? 0 : (mapAction.pitch !== undefined ? mapAction.pitch : 60);
+                    const bearing2d = mapAction.bearing !== undefined ? mapAction.bearing : window.map.getBearing();
+                    window.map.easeTo({
+                        pitch: pitch2d,
+                        bearing: bearing2d,
+                        zoom: mapAction.zoom !== undefined ? mapAction.zoom : window.map.getZoom(),
+                        duration: 1500
+                    });
+                    showNotification('🗺️ Map View', mapAction.mode === '2d' ? 'Switched to 2D top-down view' : 'Switched to 3D view', 'success');
+                    break;
             }
         } catch (error) {
             console.error('Map action execution error:', error);
-            console.error('Error details:', error.stack);
-            showNotification('❌ Map Error', `Could not execute map action: ${error.message}`, 'error');
+            showNotification('❌ Map Error', `Action failed: ${error.message}`, 'error');
         }
     }
 
@@ -4052,6 +4427,12 @@ function initializeEVStationLayer() {
 
         // Try multiple ways to match the substation name
         let coords = providedCoords;
+        
+        // Normalize object coordinates to array if needed
+        if (coords && !Array.isArray(coords) && coords.lat && coords.lon) {
+            coords = [coords.lon, coords.lat];
+        }
+
         if (!coords) {
             const normalizedId = substationId.toLowerCase().replace(/[^a-z\s]/g, '');
             coords = substationCoords[normalizedId] || substationCoords[substationId.toLowerCase()] || substationCoords[substationId];
@@ -4353,6 +4734,29 @@ function initializeEVStationLayer() {
                         responseHtml += `</div>`;
                     });
                     responseHtml += `</div></div></div>`;
+
+                    // Downloadable file links (reports, snapshots)
+                    const downloadableTools = aiResponse.tool_calls_made.filter(
+                        tc => tc.success && (tc.url || tc.download_link || tc.server_json)
+                    );
+                    if (downloadableTools.length > 0) {
+                        responseHtml += `<div style="margin-top:10px;padding-left:26px;display:flex;flex-wrap:wrap;gap:8px;">`;
+                        downloadableTools.forEach(tc => {
+                            const url = tc.url || tc.download_link;
+                            const jsonUrl = tc.server_json;
+                            if (url) {
+                                const fname = url.split('/').pop();
+                                const isPdf = fname.endsWith('.pdf');
+                                const icon = isPdf ? '📄' : '📸';
+                                const label = isPdf ? 'Download Report' : 'Download File';
+                                responseHtml += `<a href="${url}" download="${fname}" style="display:inline-flex;align-items:center;gap:6px;padding:8px 14px;background:linear-gradient(135deg,rgba(0,255,136,0.15),rgba(0,212,255,0.1));border:1px solid rgba(0,255,136,0.4);border-radius:10px;color:#00ff88;font-size:12px;font-weight:600;text-decoration:none;cursor:pointer;transition:all 0.2s ease;" onmouseover="this.style.background='rgba(0,255,136,0.25)';this.style.transform='translateY(-1px)'" onmouseout="this.style.background='linear-gradient(135deg,rgba(0,255,136,0.15),rgba(0,212,255,0.1))';this.style.transform='none'">${icon} ${label}</a>`;
+                            }
+                            if (jsonUrl) {
+                                responseHtml += `<a href="${jsonUrl}" download="${jsonUrl.split('/').pop()}" style="display:inline-flex;align-items:center;gap:6px;padding:8px 14px;background:linear-gradient(135deg,rgba(0,170,255,0.15),rgba(0,100,255,0.1));border:1px solid rgba(0,170,255,0.4);border-radius:10px;color:#00aaff;font-size:12px;font-weight:600;text-decoration:none;cursor:pointer;transition:all 0.2s ease;" onmouseover="this.style.background='rgba(0,170,255,0.25)';this.style.transform='translateY(-1px)'" onmouseout="this.style.background='linear-gradient(135deg,rgba(0,170,255,0.15),rgba(0,100,255,0.1))';this.style.transform='none'">📋 Download JSON</a>`;
+                            }
+                        });
+                        responseHtml += `</div>`;
+                    }
                 }
 
                 // Add suggestions if available
@@ -4425,6 +4829,16 @@ function initializeEVStationLayer() {
         console.log("V2G Dashboard initialized (WebSocket mode)");
     }
 
+    async function refreshV2GDashboard() {
+        try {
+            const res = await fetch('/api/v2g/status');
+            const data = await res.json();
+            if (data) updateV2GDashboard(data);
+        } catch (e) {
+            console.error('V2G refresh error:', e);
+        }
+    }
+
     async function updateV2GDashboard(data) {
         if (!data) return;
 
@@ -4432,14 +4846,20 @@ function initializeEVStationLayer() {
         // If data comes from network_state, it might be nested differently than the specific API response
         // But let's assume valid data for now or fallback safely
         
-        const activeSessions = data.v2g_sessions || data.active_sessions || []; 
+        const activeSessions = data.active_sessions_list || data.v2g_sessions || []; 
         const totalPower = data.v2g_total_power || data.total_power_kw || 0;
         const totalCars = data.v2g_vehicle_count || data.vehicles_participated || 0;
         const currentRate = data.v2g_rate || data.current_rate || 0.15;
         const totalEarnings = data.v2g_earnings || data.total_earnings || 0;
 
+        // DEBUG: Log V2G data for troubleshooting
+        console.log("V2G Update:", { active: activeSessions.length, power: totalPower, vehicles: totalCars });
+
+        // CRITICAL FIX: Ensure substation list is updated
+        updateV2GSubstationList(data);
+
         // Update metrics with animation
-        updateWithAnimation('v2g-active-sessions', activeSessions.length || activeSessions);
+        updateWithAnimation('v2g-active-sessions', activeSessions.length);
         updateWithAnimation('v2g-power', totalPower);
         updateWithAnimation('v2g-vehicles', totalCars);
         updateWithAnimation('v2g-rate', `$${currentRate.toFixed(2)}`);
@@ -5307,8 +5727,69 @@ function initializeEVStationLayer() {
             const visibility = map.getLayoutProperty('vehicles-symbols', 'visibility');
             console.log(`Layer visibility: ${visibility || 'visible'}`);
         }
-        
-        console.log('=== END DEBUG INFO ===');
+
+// --- Feature 2: Help UI Toggle ---
+window.toggleHelp = function() {
+    const modal = document.getElementById('help-modal');
+    if (modal.style.display === 'block') {
+        modal.style.display = 'none';
+    } else {
+        modal.style.display = 'block';
+    }
+};
+
+// Close modal when clicking outside
+window.onclick = function(event) {
+    const modal = document.getElementById('help-modal');
+    if (event.target === modal) {
+        modal.style.display = 'none';
+    }
+};
+
+// --- Feature 4: Data Export ---
+window.takeScreenshot = function() {
+    // Force a render first
+    map.triggerRepaint();
+    const canvas = map.getCanvas();
+    const dataURL = canvas.toDataURL('image/png');
+    const a = document.createElement('a');
+    a.href = dataURL;
+    a.download = `manhattan_grid_snapshot_${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.png`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    
+    // Show notification
+    const btn = document.querySelector('.help-footer .btn-secondary');
+    const originalText = btn.innerText;
+    btn.innerText = "✅ Saved!";
+    setTimeout(() => btn.innerText = originalText, 2000);
+};
+
+window.exportState = function() {
+    // Fetch state from new API endpoint
+    fetch('/api/export-state')
+        .then(response => response.blob())
+        .then(blob => {
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `grid_state_${new Date().toISOString().slice(0,10)}.json`;
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+            
+            const btn = document.querySelector('.help-footer .btn-primary');
+            const originalText = btn.innerText;
+            btn.innerText = "✅ Exported!";
+            setTimeout(() => btn.innerText = originalText, 2000);
+        })
+        .catch(err => {
+            console.error('Export failed:', err);
+            alert('Export failed. See console.');
+        });
+};
+
         
         return {
             hasLayer: !!hasLayer,

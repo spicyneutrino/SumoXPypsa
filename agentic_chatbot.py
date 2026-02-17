@@ -341,7 +341,14 @@ RULES:
                 "success": True,
                 "text": final_text,
                 "tool_calls_made": [
-                    {"tool": t["tool"], "args": t["args"], "success": t["result"].get("success", False)}
+                    {
+                        "tool": t["tool"],
+                        "args": t["args"],
+                        "success": t["result"].get("success", False),
+                        **({"url": t["result"]["url"]} if "url" in t["result"] else {}),
+                        **({"download_link": t["result"]["download_link"]} if "download_link" in t["result"] else {}),
+                        **({"server_json": t["result"]["server_json"]} if "server_json" in t["result"] else {}),
+                    }
                     for t in tool_results
                 ],
                 "tools_called": len(tool_results),
@@ -375,6 +382,11 @@ RULES:
             return
 
         try:
+            # --- GENERIC MAP ACTION HANDLER (Feature 3) ---
+            # Any tool can return a 'map_action' to control the map view
+            if result.get("map_action"):
+                self.socketio.emit('ai_map_focus', result["map_action"], namespace='/')
+
             if tool_name == "set_time" and result.get("success"):
                 self.socketio.emit('scenario_time_update', {
                     'hour': result.get('hour', tool_args.get('hour')),
@@ -415,9 +427,8 @@ RULES:
                     'running': tool_name == "start_simulation",
                 }, namespace='/')
 
-            elif tool_name == "focus_map" and result.get("success"):
-                map_action = result.get('map_action', {})
-                self.socketio.emit('ai_map_focus', map_action, namespace='/')
+            # Note: "focus_map" is now handled by the generic handler above
+            # elif tool_name == "focus_map" and result.get("success"): ...
 
             elif tool_name == "run_scenario" and result.get("success"):
                 self.socketio.emit('scenario_change', {
@@ -425,6 +436,22 @@ RULES:
                     'result': {k: v for k, v in result.items()
                                if k in ('success', 'scenario', 'message')}
                 }, namespace='/')
+
+            elif tool_name == "generate_situation_report" and result.get("success"):
+                report_url = result.get('url') or result.get('download_link')
+                if report_url:
+                    self.socketio.emit('trigger_report_download', {
+                        'url': report_url
+                    }, namespace='/')
+
+            elif tool_name == "capture_system_snapshot" and result.get("success"):
+                # Snapshot already emits trigger_snapshot in the tool itself,
+                # but also emit server_json link if available
+                server_json = result.get('server_json')
+                if server_json:
+                    self.socketio.emit('snapshot_saved', {
+                        'url': server_json
+                    }, namespace='/')
 
             elif tool_name == "configure_ev" and result.get("success"):
                 # Push updated EV config to frontend so sliders update

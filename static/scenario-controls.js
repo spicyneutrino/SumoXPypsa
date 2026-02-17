@@ -5,7 +5,7 @@
 
 class ScenarioControllerUI {
     constructor() {
-        this.currentTime = 12;
+        this.currentTime = new Date().getHours() + new Date().getMinutes() / 60;
         this.currentTemp = 72;
         this.autoUpdate = null;
 
@@ -20,9 +20,8 @@ class ScenarioControllerUI {
     }
 
     initAutoScheduler() {
-        // Delay before auto-switch (90 seconds)
-        const AUTO_SWITCH_DELAY_MS = 90000; 
-        // const AUTO_SWITCH_DELAY_MS = 10000; // Debug: 10s
+        // Delay before auto-switch (30 seconds)
+        const AUTO_SWITCH_DELAY_MS = 30000;
 
         // Determine target scenario based on current time
         const hour = new Date().getHours();
@@ -155,10 +154,10 @@ class ScenarioControllerUI {
                 <div class="control-section">
                     <h4>🕐 Time of Day</h4>
                     <div class="control-group">
-                        <input type="range" id="time-slider" min="0" max="23" value="12" step="1">
+                        <input type="range" id="time-slider" min="0" max="23" value="${Math.floor(this.currentTime)}" step="1">
                         <div class="control-display">
-                            <span id="time-display">12:00</span>
-                            <span id="time-description">Midday</span>
+                            <span id="time-display">${Math.floor(this.currentTime)}:00</span>
+                            <span id="time-description">${this.getTimeDescription(this.currentTime)}</span>
                         </div>
                     </div>
                 </div>
@@ -770,8 +769,9 @@ class ScenarioControllerUI {
                 this.updateTempDisplay(scenarioConfig.temp);
             }
 
-            // Set time
-            await this.setTime(scenarioConfig.time, true);
+            // Set time (autoSpawnVehicles=false — spawnVehicles below handles it,
+            // otherwise SUMO gets started twice causing "Connection already closed")
+            await this.setTime(scenarioConfig.time, false);
 
             // Set temperature
             await this.setTemperature(scenarioConfig.temp);
@@ -1167,15 +1167,66 @@ class ScenarioControllerUI {
 
         this.socket.on('ai_map_focus', (data) => {
             console.log('[Agentic] Map focus:', data);
-            if (data && data.coordinates && window.map) {
-                const coords = Array.isArray(data.coordinates)
-                    ? data.coordinates
-                    : [data.coordinates.lon || data.coordinates[0], data.coordinates.lat || data.coordinates[1]];
+            if (data && (data.coordinates || data.coords) && window.map) {
+                // Normalize coordinates
+                let coords = data.coordinates || data.coords;
+                if (!Array.isArray(coords) && coords.lat && coords.lon) {
+                    coords = [coords.lon, coords.lat];
+                }
+
+                // 1. Fly to location
                 window.map.flyTo({
                     center: coords,
                     zoom: data.zoom || 16,
-                    duration: 2000
+                    pitch: data.pitch || 45,
+                    bearing: data.bearing !== undefined ? data.bearing : -17.6,
+                    essential: true,
+                    speed: 1.2
                 });
+
+                // 2. Visual Highlight (Feature 3)
+                // Remove existing highlight
+                const existing = document.getElementById('ai-highlight-marker');
+                if (existing) existing.remove();
+
+                if (data.type === 'highlight_failure' || data.type === 'highlight_location' || data.type === 'highlight_restore') {
+                    const el = document.createElement('div');
+                    el.id = 'ai-highlight-marker';
+                    el.className = 'ai-pulse-marker';
+                    
+                    // Style based on type
+                    if (data.type === 'highlight_failure') {
+                        el.style.backgroundColor = 'rgba(255, 50, 50, 0.5)';
+                        el.style.border = '2px solid #ff3232';
+                        el.style.boxShadow = '0 0 20px #ff3232';
+                    } else {
+                        el.style.backgroundColor = 'rgba(0, 255, 136, 0.5)';
+                        el.style.border = '2px solid #00ff88';
+                        el.style.boxShadow = '0 0 20px #00ff88';
+                    }
+                    
+                    el.style.width = '60px';
+                    el.style.height = '60px';
+                    el.style.borderRadius = '50%';
+                    el.style.pointerEvents = 'none'; // Click through
+                    
+                    // CSS Animation (assuming ai-pulse-marker has generic pulse or we add it inline)
+                    el.animate([
+                        { transform: 'scale(0.5)', opacity: 0 },
+                        { transform: 'scale(1)', opacity: 0.8 },
+                        { transform: 'scale(1.5)', opacity: 0 }
+                    ], {
+                        duration: 2000,
+                        iterations: Infinity
+                    });
+
+                    new mapboxgl.Marker({ element: el })
+                        .setLngLat(coords)
+                        .addTo(window.map);
+                        
+                    // Auto-remove after 8s
+                    setTimeout(() => el.remove(), 8000);
+                }
             }
         });
 
@@ -1250,19 +1301,23 @@ class ScenarioControllerUI {
 
         // 1. Update Scenario UI (Time, Weather, Substations)
         if (data.scenario) {
-            // Update time if auto-advancing (skip if chatbot just set time)
+            // Update time from backend (skip if user/chatbot just set time manually)
             if (data.scenario.auto_advance) {
                 const timeSinceManualUpdate = Date.now() - (window._lastManualTimeUpdate || this._lastChatbotTimeUpdate || 0);
-                if (timeSinceManualUpdate > 5000) {
-                    // Only auto-advance if chatbot hasn't set time recently
-                    const totalHours = data.scenario.time_hour + (data.scenario.time_minute/60) + (data.scenario.time_second/3600);
-                    this.currentTime = totalHours;
-                    
+                if (timeSinceManualUpdate > 3000) {
+                    const h = data.scenario.time_hour;
+                    const m = data.scenario.time_minute;
+                    const s = data.scenario.time_second;
+                    this.currentTime = h + m / 60 + s / 3600;
+
                     const timeSlider = document.getElementById('time-slider');
                     if (timeSlider && Math.abs(timeSlider.value - this.currentTime) > 0.1) {
                         timeSlider.value = this.currentTime;
                     }
-                    this.updateTimeDisplay(this.currentTime);
+                    // Pass exact integer components to avoid float round-trip errors
+                    if (window.updateLocalTime) {
+                        window.updateLocalTime(h, m, s);
+                    }
                 }
             }
             

@@ -571,6 +571,39 @@ TOOL_DEFINITIONS = [
             }
         }
     },
+    
+    # -------------------------------------------------------------------------
+    # REPORTING & MEDIA
+    # -------------------------------------------------------------------------
+    {
+        "type": "function",
+        "function": {
+            "name": "capture_system_snapshot",
+            "description": "Capture a visual snapshot of the current system state (map view) and download it along with key metrics. Use this when the user wants to save what they see.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_situation_report",
+            "description": "Generate a professional PDF situation report of the current grid status, including load, V2G operations, and traffic stats. Returns a link to the PDF.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                     "notes": {
+                        "type": "string",
+                        "description": "Optional notes or observations to include in the report."
+                     }
+                },
+                "required": []
+            }
+        }
+    },
 ]
 
 
@@ -598,46 +631,234 @@ class ToolExecutor:
 
         # Map tool names → handler methods
         self.handlers = {
-            # Substation Control
+            # Substation
             "fail_substation": self._fail_substation,
             "restore_substation": self._restore_substation,
             "restore_all_substations": self._restore_all_substations,
-            # V2G Control
+
+            # V2G
             "enable_v2g": self._enable_v2g,
             "disable_v2g": self._disable_v2g,
             "get_v2g_status": self._get_v2g_status,
-            # Simulation Control
+
+            # Sim Control
             "start_simulation": self._start_simulation,
             "stop_simulation": self._stop_simulation,
             "spawn_vehicles": self._spawn_vehicles,
             "set_simulation_speed": self._set_simulation_speed,
-            # Scenario Control
+
+            # Scenario / Env
             "set_time": self._set_time,
             "set_temperature": self._set_temperature,
             "run_scenario": self._run_scenario,
-            # EV Configuration
-            "configure_ev": self._configure_ev,
-            # Status & Queries
+            "prepare_for_event": self._prepare_for_event,
+
+            # Status
             "get_system_status": self._get_system_status,
             "get_scenario_status": self._get_scenario_status,
             "get_substation_details": self._get_substation_details,
             "get_load_forecast": self._get_load_forecast,
-            # Map Control
+            "analyze_grid_vulnerability": self._analyze_grid_vulnerability,
+
+            # Map
             "focus_map": self._focus_map,
-            "toggle_map_layer": self._toggle_map_layer,
             "set_map_view": self._set_map_view,
-            # EV Station Control
+            "toggle_map_layer": self._toggle_map_layer,
+
+            # EV Stations
             "fail_ev_station": self._fail_ev_station,
             "restore_ev_station": self._restore_ev_station,
+            "configure_ev": self._configure_ev,
+
             # Blackout
             "trigger_blackout": self._trigger_blackout,
-            # Test Scenarios
+
+            # Reports & Media
+            "capture_system_snapshot": self._capture_system_snapshot,
+            "generate_situation_report": self._generate_situation_report,
+
+            # Tests
             "run_ev_rush_test": self._run_ev_rush_test,
             "run_v2g_test": self._run_v2g_test,
-            # Macro / Multi-Step Tools
             "run_resilience_test": self._run_resilience_test,
-            "analyze_grid_vulnerability": self._analyze_grid_vulnerability,
-            "prepare_for_event": self._prepare_for_event,
+        }
+
+
+    def _locate_component(self, query: str) -> dict:
+        """Find a component and return its location + map action"""
+        query_lower = query.lower()
+        
+        # 1. Search Substations
+        for name, sub in self.integrated_system.substations.items():
+            if query_lower in name.lower() or name.lower() in query_lower:
+                return {
+                    "success": True,
+                    "found": True,
+                    "type": "substation",
+                    "name": name,
+                    "description": f"{name} Substation is located at {sub['lat']:.4f}, {sub['lon']:.4f}. Status: {'Operational' if sub.get('operational', True) else 'Offline'}.",
+                    "map_action": {
+                        "type": "highlight_location",
+                        "location": name,
+                        "coords": [sub['lon'], sub['lat']],
+                        "zoom": 14,
+                        "pitch": 45
+                    }
+                }
+                
+        # 2. Search EV Stations
+        for ev_id, station in self.integrated_system.ev_stations.items():
+            if query_lower in ev_id.lower() or query_lower in station.get('name', '').lower():
+                return {
+                    "success": True,
+                    "found": True,
+                    "type": "ev_station",
+                    "name": station.get('name', ev_id),
+                    "description": f"EV Station {station.get('name', ev_id)} is located at {station['lat']:.4f}, {station['lon']:.4f}. Status: {'Operational' if station.get('operational', True) else 'Offline'}.",
+                    "map_action": {
+                        "type": "highlight_location",
+                        "location": station.get('name', ev_id),
+                        "coords": [station['lon'], station['lat']],
+                        "zoom": 16,
+                        "pitch": 60
+                    }
+                }
+
+        # 3. Known Landmarks & Aliases
+        landmarks = {
+            "central park": {"lat": 40.785091, "lon": -73.968285, "desc": "Central Park, the green heart of Manhattan."},
+            "empire state": {"lat": 40.7484, "lon": -73.9857, "desc": "The Empire State Building, a historic landmark."},
+            "statue of liberty": {"lat": 40.6892, "lon": -74.0445, "desc": "The Statue of Liberty."},
+            "bryant park": {"lat": 40.7536, "lon": -73.9832, "desc": "Bryant Park, a beloved public park in Midtown."},
+            "times square": {"lat": 40.7580, "lon": -73.9855, "desc": "Times Square, the crossroads of the world."}
+        }
+        
+        # Aliases for fuzzy matching
+        aliases = {
+            "bryant park station": "Times Square",
+            "bryant part": "Bryant Park",  # Handle typo
+            "grand central station": "Grand Central",
+            "penn station": "Penn Station"
+        }
+        
+        # Check aliases first (Substring matching)
+        for alias, target in aliases.items():
+            if alias in query_lower:
+                # specific catch for "bryant part" -> "Bryant Park" landmark
+                if target == "Bryant Park":
+                    # Let it fall through to landmarks check below
+                    query_lower = query_lower.replace(alias, target.lower())
+                    continue
+                    
+                # Search for the target name directly in substations
+                for name, sub in self.integrated_system.substations.items():
+                    if target.lower() in name.lower():
+                         return {
+                            "success": True,
+                            "found": True,
+                            "type": "substation",
+                            "name": name,
+                            "description": f"Found '{alias}' (mapped to {name}). Located at {sub['lat']:.4f}, {sub['lon']:.4f}. Status: {'Operational' if sub.get('operational', True) else 'Offline'}.",
+                            "map_action": {
+                                "type": "highlight_location",
+                                "location": name,
+                                "coords": [sub['lon'], sub['lat']],
+                                "zoom": 15,
+                                "pitch": 45
+                            }
+                        }
+        
+        for name, data in landmarks.items():
+            if name in query_lower:
+                 return {
+                    "success": True,
+                    "found": True,
+                    "type": "landmark",
+                    "name": name.title(),
+                    "description": data['desc'],
+                    "map_action": {
+                        "type": "highlight_location",
+                        "location": name.title(),
+                        "coords": [data['lon'], data['lat']],
+                        "zoom": 15,
+                        "pitch": 45
+                    }
+                }
+        
+        return {
+            "success": False, 
+            "found": False, 
+            "error": f"Could not locate '{query}'. Try asking for a specific substation or EV station."
+        }
+
+    def _locate_component(self, query: str) -> dict:
+        """Find a component and return its location + map action"""
+        query_lower = query.lower()
+        
+        # 1. Search Substations
+        for name, sub in self.integrated_system.substations.items():
+            if query_lower in name.lower() or name.lower() in query_lower:
+                return {
+                    "success": True,
+                    "found": True,
+                    "type": "substation",
+                    "name": name,
+                    "description": f"{name} Substation is located at {sub['lat']:.4f}, {sub['lon']:.4f}. Status: {'Operational' if sub.get('operational', True) else 'Offline'}.",
+                    "map_action": {
+                        "type": "highlight_location",
+                        "location": name,
+                        "coords": [sub['lon'], sub['lat']],
+                        "zoom": 14,
+                        "pitch": 45
+                    }
+                }
+                
+        # 2. Search EV Stations
+        for ev_id, station in self.integrated_system.ev_stations.items():
+            if query_lower in ev_id.lower() or query_lower in station.get('name', '').lower():
+                return {
+                    "success": True,
+                    "found": True,
+                    "type": "ev_station",
+                    "name": station.get('name', ev_id),
+                    "description": f"EV Station {station.get('name', ev_id)} is located at {station['lat']:.4f}, {station['lon']:.4f}. Status: {'Operational' if station.get('operational', True) else 'Offline'}.",
+                    "map_action": {
+                        "type": "highlight_location",
+                        "location": station.get('name', ev_id),
+                        "coords": [station['lon'], station['lat']],
+                        "zoom": 16,
+                        "pitch": 60
+                    }
+                }
+
+        # 3. Known Landmarks (Hardcoded for demo)
+        landmarks = {
+            "central park": {"lat": 40.785091, "lon": -73.968285, "desc": "Central Park, the green heart of Manhattan."},
+            "empire state": {"lat": 40.7484, "lon": -73.9857, "desc": "The Empire State Building, a historic landmark."},
+            "statue of liberty": {"lat": 40.6892, "lon": -74.0445, "desc": "The Statue of Liberty."}
+        }
+        
+        for name, data in landmarks.items():
+            if name in query_lower:
+                 return {
+                    "success": True,
+                    "found": True,
+                    "type": "landmark",
+                    "name": name.title(),
+                    "description": data['desc'],
+                    "map_action": {
+                        "type": "highlight_location",
+                        "location": name.title(),
+                        "coords": [data['lon'], data['lat']],
+                        "zoom": 15,
+                        "pitch": 45
+                    }
+                }
+        
+        return {
+            "success": False, 
+            "found": False, 
+            "error": f"Could not locate '{query}'. Try asking for a specific substation or EV station."
         }
 
     def execute(self, tool_name: str, arguments: dict) -> dict:
@@ -700,7 +921,8 @@ class ToolExecutor:
             "map_action": {
                 "type": "highlight_failure",
                 "location": substation,
-                "coords": sub_data.get('coords', sub_data.get('location', []))
+                "coords": sub_data.get('coords', sub_data.get('location', 
+                          [sub_data['lon'], sub_data['lat']] if 'lat' in sub_data and 'lon' in sub_data else []))
             }
         }
 
@@ -742,7 +964,8 @@ class ToolExecutor:
             "map_action": {
                 "type": "highlight_restore",
                 "location": substation,
-                "coords": sub_data.get('coords', sub_data.get('location', []))
+                "coords": sub_data.get('coords', sub_data.get('location', 
+                          [sub_data['lon'], sub_data['lat']] if 'lat' in sub_data and 'lon' in sub_data else []))
             }
         }
 
@@ -796,7 +1019,14 @@ class ToolExecutor:
             "power_needed_mw": power_needed,
             "energy_needed_kwh": energy_needed,
             "rate_per_kwh": rate,
-            "vehicles_needed": max(2, int(energy_needed / 30) + 1)
+            "vehicles_needed": max(2, int(energy_needed / 30) + 1),
+            "map_action": {
+                "type": "highlight_restore",
+                "location": substation,
+                "coords": [sub_data['lon'], sub_data['lat']],
+                "zoom": 15,
+                "pitch": 50
+             }
         }
 
     def _disable_v2g(self, substation: str) -> dict:
@@ -805,7 +1035,19 @@ class ToolExecutor:
             return {"success": False, "error": f"Substation '{substation}' not found"}
 
         self.v2g_manager.disable_v2g_for_substation(substation)
-        return {"success": True, "substation": substation, "action": "v2g_disabled"}
+        sub_data = self.integrated_system.substations[substation]
+        return {
+            "success": True, 
+            "substation": substation, 
+            "action": "v2g_disabled",
+            "map_action": {
+                "type": "highlight_location",
+                "location": substation,
+                "coords": [sub_data['lon'], sub_data['lat']],
+                "zoom": 14,
+                "pitch": 45
+             }
+        }
 
     def _get_v2g_status(self) -> dict:
         """Get V2G dashboard data"""
@@ -1295,7 +1537,17 @@ class ToolExecutor:
 
         ev_station = self.integrated_system.ev_stations[station_id]
         if not ev_station.get('operational', True):
-            return {"success": False, "error": f"{station_id} is already offline"}
+            return {
+                "success": False, 
+                "error": f"{station_id} is already offline",
+                "map_action": {
+                    "type": "highlight_failure",
+                    "location": station_id,
+                    "coords": [ev_station['lon'], ev_station['lat']],
+                    "zoom": 16,
+                    "pitch": 60
+                }
+            }
 
         # Handle station failure in station manager
         released_vehicles = []
@@ -1324,7 +1576,14 @@ class ToolExecutor:
             "station_id": station_id,
             "station_name": ev_station.get('name', station_id),
             "released_vehicles": len(released_vehicles),
-            "message": f"{ev_station.get('name', station_id)} taken offline — {len(released_vehicles)} vehicles released"
+            "message": f"{ev_station.get('name', station_id)} taken offline — {len(released_vehicles)} vehicles released",
+            "map_action": {
+                "type": "highlight_failure",
+                "location": station_id,
+                "coords": [ev_station['lon'], ev_station['lat']],
+                "zoom": 16,
+                "pitch": 60
+            }
         }
 
     def _restore_ev_station(self, station_id: str) -> dict:
@@ -1361,7 +1620,14 @@ class ToolExecutor:
             "success": True,
             "station_id": station_id,
             "station_name": ev_station.get('name', station_id),
-            "message": f"{ev_station.get('name', station_id)} restored to service"
+            "message": f"{ev_station.get('name', station_id)} restored to service",
+            "map_action": {
+                "type": "highlight_restore",
+                "location": station_id,
+                "coords": [ev_station['lon'], ev_station['lat']],
+                "zoom": 16,
+                "pitch": 60
+            }
         }
 
     # =========================================================================
@@ -1397,12 +1663,73 @@ class ToolExecutor:
             "spare_substation": spare_substation,
             "count_failed": len(failed),
             "already_offline": [s for s in skipped if s != spare_substation],
-            "message": f"⚠️ BLACKOUT: {len(failed)} substations taken offline. Only {spare_substation} remains operational."
+            "message": f"⚠️ BLACKOUT: {len(failed)} substations taken offline. Only {spare_substation} remains operational.",
+            "map_action": {
+                "type": "highlight_location",
+                "location": "New York City",
+                "coords": [-73.980, 40.758],  # Center of Manhattan
+                "zoom": 12,
+                "pitch": 0,
+                "bearing": 0
+            }
         }
 
     # =========================================================================
     # MACRO / MULTI-STEP TOOLS
     # =========================================================================
+
+    def _prepare_for_event(self, event: str) -> dict:
+        """Prepare the grid for a specific event — sets time, temperature,
+        spawns vehicles, and adjusts EV config automatically."""
+
+        event_profiles = {
+            "heatwave": {"hour": 14, "minute": 0, "temp": 102, "vehicles": 90, "ev_pct": 70,
+                         "description": "Peak afternoon heatwave — extreme AC demand"},
+            "morning_rush": {"hour": 8, "minute": 0, "temp": 68, "vehicles": 100, "ev_pct": 70,
+                             "description": "Morning rush hour — high traffic and EV commuting"},
+            "evening_peak": {"hour": 18, "minute": 0, "temp": 75, "vehicles": 80, "ev_pct": 70,
+                             "description": "Evening peak — commuters returning, V2G opportunity"},
+            "storm": {"hour": 16, "minute": 0, "temp": 55, "vehicles": 30, "ev_pct": 70,
+                      "description": "Severe storm — reduced traffic, grid stress"},
+            "normal": {"hour": 12, "minute": 0, "temp": 72, "vehicles": 50, "ev_pct": 70,
+                       "description": "Normal midday conditions"},
+        }
+
+        profile = event_profiles.get(event)
+        if not profile:
+            return {"success": False, "error": f"Unknown event type: {event}. Choose from: {list(event_profiles.keys())}"}
+
+        actions = []
+
+        time_result = self._set_time(profile["hour"], profile["minute"])
+        actions.append({"action": "set_time", "success": time_result.get("success", False)})
+
+        temp_result = self._set_temperature(profile["temp"])
+        actions.append({"action": "set_temperature", "success": temp_result.get("success", False)})
+
+        if not self.system_state.get('sumo_running'):
+            sim_result = self._start_simulation(
+                vehicle_count=profile["vehicles"],
+                ev_percentage=profile["ev_pct"]
+            )
+            actions.append({"action": "start_simulation", "success": sim_result.get("success", False)})
+        else:
+            spawn_result = self._spawn_vehicles(count=profile["vehicles"])
+            actions.append({"action": "spawn_vehicles", "success": spawn_result.get("success", False)})
+
+        return {
+            "success": True,
+            "event": event,
+            "description": profile["description"],
+            "hour": profile["hour"],
+            "minute": profile["minute"],
+            "temperature": profile["temp"],
+            "vehicles": profile["vehicles"],
+            "actions": actions,
+            "message": f"Grid prepared for {event}: {profile['description']}. "
+                       f"Time set to {profile['hour']:02d}:{profile['minute']:02d}, "
+                       f"temperature {profile['temp']}°F, {profile['vehicles']} vehicles."
+        }
 
     def _run_resilience_test(self, substation: str) -> dict:
         """Multi-step resilience test: fail → enable V2G → measure → restore."""
@@ -1514,46 +1841,62 @@ class ToolExecutor:
             "message": f"Grid vulnerability analysis: {overall_risk} overall risk. {len(high_risk)} substations at elevated risk."
         }
 
-    def _prepare_for_event(self, event: str) -> dict:
-        """Orchestrate time, temperature, vehicles, and EV config for an event."""
-        EVENT_CONFIGS = {
-            "heatwave": {"hour": 14, "minute": 0, "temp": 102, "vehicles": 80, "ev_pct": 80, "label": "Summer Heatwave (2pm, 102°F)"},
-            "morning_rush": {"hour": 8, "minute": 30, "temp": 72, "vehicles": 100, "ev_pct": 70, "label": "Morning Rush Hour (8:30am)"},
-            "evening_peak": {"hour": 18, "minute": 0, "temp": 78, "vehicles": 90, "ev_pct": 75, "label": "Evening Peak (6pm)"},
-            "storm": {"hour": 22, "minute": 0, "temp": 45, "vehicles": 30, "ev_pct": 60, "label": "Winter Storm (10pm, 45°F)"},
-            "normal": {"hour": 12, "minute": 0, "temp": 72, "vehicles": 50, "ev_pct": 70, "label": "Normal Operations (noon, 72°F)"},
-        }
 
-        config = EVENT_CONFIGS.get(event)
-        if not config:
-            return {"success": False, "error": f"Unknown event: {event}. Valid: {list(EVENT_CONFIGS.keys())}"}
 
-        actions = []
+    # =========================================================================
+    # REPORTS & MEDIA
+    # =========================================================================
 
-        # Set time
-        time_result = self._set_time(hour=config["hour"], minute=config["minute"])
-        actions.append({"action": "set_time", "success": time_result.get('success', False)})
+    def _capture_system_snapshot(self) -> dict:
+        """Trigger frontend snapshot download and also save server-side state JSON."""
+        try:
+            from flask import current_app
+            from main_complete_integration import socketio, _collect_comprehensive_state
 
-        # Set temperature
-        temp_result = self._set_temperature(temperature=config["temp"])
-        actions.append({"action": "set_temperature", "success": temp_result.get('success', False), "value": config["temp"]})
+            # Trigger the frontend PNG + JSON download
+            socketio.emit('trigger_snapshot')
 
-        # Configure EV percentage
-        ev_result = self._configure_ev(ev_percentage=config["ev_pct"])
-        actions.append({"action": "configure_ev", "success": ev_result.get('success', False), "ev_pct": config["ev_pct"]})
+            # Also persist comprehensive state as a server-side JSON file
+            import json, os, time as _time
+            from datetime import datetime as _dt
+            state = _collect_comprehensive_state()
+            state['meta'] = {
+                'snapshot_id': f"SNAP-{int(_time.time() * 1000)}",
+                'timestamp': _dt.now().isoformat(),
+                'generated_by': 'Manhattan Grid Control — Agentic Tool'
+            }
+            snap_dir = os.path.join(os.getcwd(), 'static', 'snapshots')
+            os.makedirs(snap_dir, exist_ok=True)
+            fname = f"snapshot_{_dt.now().strftime('%Y%m%d_%H%M%S')}.json"
+            fpath = os.path.join(snap_dir, fname)
+            with open(fpath, 'w') as f:
+                json.dump(state, f, indent=2, default=str)
 
-        # Spawn vehicles if simulation is running
-        if self.system_state.get('sumo_running'):
-            spawn_result = self._spawn_vehicles(count=config["vehicles"])
-            actions.append({"action": "spawn_vehicles", "success": spawn_result.get('success', False), "count": config["vehicles"]})
+            return {
+                "success": True,
+                "message": f"Snapshot triggered on dashboard and saved server-side at /static/snapshots/{fname}",
+                "server_json": f"/static/snapshots/{fname}"
+            }
+        except ImportError:
+            return {"success": False, "error": "SocketIO not available in this context."}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
-        return {
-            "success": True,
-            "event": event,
-            "label": config["label"],
-            "actions_taken": actions,
-            "hour": config["hour"],
-            "minute": config["minute"],
-            "temperature": config["temp"],
-            "message": f"Environment prepared for {config['label']}. {len(actions)} systems adjusted."
-        }
+    def _generate_situation_report(self, notes: str = None) -> dict:
+        """Generate comprehensive PDF report with AI analysis."""
+        try:
+            from main_complete_integration import _collect_comprehensive_state
+            state = _collect_comprehensive_state()
+
+            from report_generator import ReportGenerator
+            generator = ReportGenerator()
+            report_url = generator.generate_status_report(state, notes=notes)
+
+            return {
+                "success": True,
+                "url": report_url,
+                "message": f"Comprehensive report generated. Download here: {report_url}",
+                "download_link": report_url
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}

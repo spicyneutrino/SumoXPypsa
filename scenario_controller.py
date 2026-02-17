@@ -107,7 +107,9 @@ class ScenarioController:
         self.on_update_callback = on_update_callback
 
         # Scenario parameters - REALISTIC TIME SYSTEM
-        self.current_time_seconds = 12 * 3600  # Time in seconds since midnight (0-86400)
+        # Initialize from the actual system clock so the simulation starts at "now"
+        _now = time.localtime()
+        self.current_time_seconds = _now.tm_hour * 3600 + _now.tm_min * 60 + _now.tm_sec
         self.current_temperature = 72  # Fahrenheit
         self.time_speed = 60.0  # Simulation speed: 60x real-time (1 real second = 1 sim minute)
         self.auto_time_advance = True  # Auto-advance by default for realism
